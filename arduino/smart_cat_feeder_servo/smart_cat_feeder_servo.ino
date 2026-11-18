@@ -9,6 +9,8 @@
 // Does not dispense controlled portions; bench-test without the hopper attached.
 
 const uint8_t SERVO_PIN = 9;
+const uint8_t LED_GREEN_PIN = 4;    // Green: Idle (normal, not moving)
+const uint8_t LED_YELLOW_PIN = 5;   // Yellow: Feeding or manual Emergency
 const uint8_t MANUAL_BUTTON_PIN = 2;       // Momentary NO push button: D2 <-> GND
 const unsigned long BUTTON_DEBOUNCE_MS = 35UL;
 const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid presses
@@ -103,6 +105,14 @@ bool hasFed = false;
 char lineBuffer[24];
 uint8_t lineLength = 0;
 
+// Exclusive LEDs: GREEN only while truly idle; YELLOW for movement
+// (YOLO FEED or D2 manual button), or during latched software EMERGENCY.
+void updateStatusLEDs() {
+  const bool active = (servoState != IDLE) || emergencyActive;
+  digitalWrite(LED_GREEN_PIN, active ? LOW : HIGH);
+  digitalWrite(LED_YELLOW_PIN, active ? HIGH : LOW);
+}
+
 // Shared servo state machine, preserving existing FEED serial protocol.
 void startServoCycle(bool manual) {
   const unsigned long now = millis();
@@ -123,6 +133,7 @@ void startServoCycle(bool manual) {
   }
   feederServo.write(OPEN_ANGLE);
   digitalWrite(LED_BUILTIN, HIGH);
+  updateStatusLEDs();
 }
 
 void updateManualButton() {
@@ -207,6 +218,7 @@ void handleCommand(const char *command) {
     manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
     showScreen(SCREEN_EMERGENCY);
+    updateStatusLEDs();
     Serial.println(F("ACK EMERGENCY"));
     return;
   }
@@ -218,6 +230,7 @@ void handleCommand(const char *command) {
     manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
     showScreen(SCREEN_IDLE);
+    updateStatusLEDs();
     Serial.println(F("ACK RESET"));
     return;
   }
@@ -289,6 +302,7 @@ void updateServo() {
     digitalWrite(LED_BUILTIN, LOW);
     manualCycle = false;
     showScreen(emergencyActive ? SCREEN_EMERGENCY : SCREEN_IDLE);
+    updateStatusLEDs();
     Serial.println(F("DONE"));
   }
 }
@@ -296,6 +310,9 @@ void updateServo() {
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
+  pinMode(LED_GREEN_PIN, OUTPUT);
+  pinMode(LED_YELLOW_PIN, OUTPUT);
+  updateStatusLEDs(); // Boot in Idle: green ON, yellow OFF.
   pinMode(MANUAL_BUTTON_PIN, INPUT_PULLUP);
   lastButtonRaw = digitalRead(MANUAL_BUTTON_PIN);
   stableButton = lastButtonRaw;
