@@ -27,12 +27,25 @@ def main():
         "--button-monitor", action="store_true",
         help="Monitor Arduino serial events while pressing the physical D2 button"
     )
+    actions.add_argument(
+        "--food-monitor", action="store_true",
+        help="Monitor raw infrared sensor and confirmed food state (no servo movement)"
+    )
     args = parser.parse_args()
     bridge = ArduinoBridge(args.port)
     try:
         print("[PING]", "OK" if bridge.ping() else "FAILED", flush=True)
         print("[STATUS]", bridge.status(), flush=True)
-        if args.button_monitor:
+        if args.food_monitor:
+            print("[IR] Pantau sensor D6. Tutupi/hilangkan pakan di depan sensor.", flush=True)
+            print("[IR] Ctrl+C untuk berhenti. Tidak ada perintah FEED.", flush=True)
+            try:
+                while True:
+                    print("[IR]", bridge.food_status(), flush=True)
+                    time.sleep(0.7)
+            except KeyboardInterrupt:
+                print("\n[IR] Monitor selesai.", flush=True)
+        elif args.button_monitor:
             print("[BUTTON] Tekan tombol D2 ke GND. Servo bergerak dari tombol, bukan Python.", flush=True)
             print("[BUTTON] Ctrl+C untuk berhenti.", flush=True)
             try:
