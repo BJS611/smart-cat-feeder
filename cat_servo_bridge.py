@@ -21,18 +21,35 @@ class ArduinoBridge:
             timeout=0.15,
             write_timeout=1.0,
         )
-        # USB serial often auto-resets the Arduino Uno, which needs boot time.
-        time.sleep(2.5)
-        self.serial.reset_input_buffer()
-        self._write("PING\n")
-        reply = self._wait_for(("PONG",), timeout=3.0)
-        if reply != "PONG":
+        # Opening the CH340 serial port can reset an Arduino Uno.
+        # The I2C LCD setup may delay startup, so a single early PING can
+        # be lost. Retry only the harmless PING command until board is ready.
+        time.sleep(1.0)
+        last_reply = None
+        handshake_deadline = time.monotonic() + 12.0
+        attempt = 0
+        try:
+            while time.monotonic() < handshake_deadline:
+                attempt += 1
+                print("[SERIAL] PING percobaan %d..." % attempt, flush=True)
+                self._write("PING\n")
+                reply = self._wait_for(("PONG",), timeout=1.25)
+                if reply == "PONG":
+                    print("[ARDUINO OK] %s pada %d baud; PONG diterima" %
+                          (port, baudrate), flush=True)
+                    break
+                if reply:
+                    last_reply = reply
+            else:
+                raise RuntimeError(
+                    "Arduino tidak menjawab PING setelah beberapa percobaan di %s. "
+                    "Pastikan sketch terbaru, baudrate 115200, port benar, "
+                    "dan Arduino tidak terus-menerus restart. Balasan terakhir: %r"
+                    % (port, last_reply)
+                )
+        except Exception:
             self.close()
-            raise RuntimeError(
-                "Arduino tidak menjawab PING di %s. Pastikan sketch telah di-upload. Balasan: %r"
-                % (port, reply)
-            )
-        print("[ARDUINO OK] %s pada %d baud; PONG diterima" % (port, baudrate), flush=True)
+            raise
 
     def _write(self, message):
         self.serial.write(message.encode("ascii"))
