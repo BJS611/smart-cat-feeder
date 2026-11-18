@@ -19,12 +19,24 @@ def main():
         "--lcd-demo", action="store_true",
         help="Show Idle -> Emergency (4 s) -> Idle on LCD; does not move servo"
     )
+    actions.add_argument(
+        "--i2c-scan", action="store_true",
+        help="Scan Arduino Uno A4/A5 for connected I2C devices; no servo movement"
+    )
     args = parser.parse_args()
     bridge = ArduinoBridge(args.port)
     try:
         print("[PING]", "OK" if bridge.ping() else "FAILED", flush=True)
         print("[STATUS]", bridge.status(), flush=True)
-        if args.lcd_demo:
+        if args.i2c_scan:
+            print("[I2C] Memindai bus A4(SDA) / A5(SCL)...", flush=True)
+            devices = bridge.scan_i2c()
+            if devices:
+                print("[I2C OK] Alamat ditemukan: %s" % ", ".join(devices), flush=True)
+                print("[I2C] Firmware LCD saat ini memakai 0x27.", flush=True)
+            else:
+                print("[I2C] TIDAK ADA alamat ditemukan. Cek VCC, GND, SDA=A4, SCL=A5 dan backpack LCD.", flush=True)
+        elif args.lcd_demo:
             print("[LCD] Arduino should display: Idle", flush=True)
             time.sleep(2)
             if not bridge.emergency():
