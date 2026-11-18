@@ -70,7 +70,29 @@ void printStatus() {
   }
 }
 
+void scanI2CBus() {
+  // Diagnostic only. This does not move the servo or change the LCD state.
+  uint8_t found = 0;
+  Serial.println(F("I2C_SCAN_START"));
+  for (uint8_t address = 1; address <= 126; address++) {
+    Wire.beginTransmission(address);
+    const uint8_t error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print(F("I2C_FOUND 0x"));
+      if (address < 16) Serial.print('0');
+      Serial.println(address, HEX);
+      found++;
+    }
+  }
+  Serial.print(F("I2C_SCAN_DONE "));
+  Serial.println(found);
+}
+
 void handleCommand(const char *command) {
+  if (strcmp(command, "I2C_SCAN") == 0) {
+    scanI2CBus();
+    return;
+  }
   if (strcmp(command, "PING") == 0) {
     Serial.println(F("PONG"));
     return;
