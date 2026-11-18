@@ -1,6 +1,6 @@
 # Smart Cat Feeder — YOLO11 Single Model
 
-Saat ini proyek hanya memakai **satu model YOLO11n Object Detection** pada Raspberry Pi 5 4GB dengan webcam JETE W7. Tidak ada klasifikasi umur, pengukuran berat, maupun kontrol servo pada pengujian ini.
+Saat ini proyek memakai **satu model YOLO11n Object Detection** pada Raspberry Pi 5 4GB dengan webcam JETE W7. Klasifikasi umur tetap dinonaktifkan. Kontrol servo Arduino Uno **opsional** melalui USB serial untuk **bench test tanpa pakan**; saat port Arduino tidak diberikan, program hanya menampilkan live video.
 
 ## Model aktif
 
@@ -102,6 +102,114 @@ Buka browser laptop ke **http://127.0.0.1:8767/**.
 
 Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka `http://IP_PI:8767`; server secara sengaja hanya mendengarkan localhost agar tidak terekspos ke jaringan. Hentikan streaming dengan Ctrl+C.
 
+## Arduino Uno + MG996R lewat USB serial (prototype / uji tanpa pakan)
+
+### Skema koneksi
+
+- **Raspberry Pi 5 USB** → **Arduino Uno USB Type-B** (kabel data).
+- **Arduino D9** → **MG996R signal** (oranye/kuning).
+- **Supply servo eksternal 5–6V (+)** → **MG996R merah**.
+- **Supply servo eksternal GND (−)** → **MG996R cokelat/hitam**.
+- **Arduino GND** → **GND supply servo** (*common ground*, wajib).
+- **Jangan memberi daya servo dari pin 5V/3.3V Raspberry Pi atau 5V Arduino.** Gunakan catu daya 5–6V berarus cukup, misalnya 3A untuk **satu** MG996R, serta periksa spesifikasi unit.
+
+**Uji pertama tanpa memasang lengan servo ke mekanisme dispenser, dan tanpa makanan.** Program ini belum memakai HX711/load cell; gerakan servo tidak menjamin gram pakan tertentu. Jangan gunakan sebagai feeder otomatis tanpa batasan mekanis, porsi dan pengujian keselamatan.
+
+### 1) Upload sketch Arduino (C++)
+
+Pada Arduino IDE, pilih **Arduino Uno** dan port USB Arduino. Buka file:
+
+`arduino/smart_cat_feeder_servo/smart_cat_feeder_servo.ino`
+
+Klik **Upload**. Sketch memakai pustaka `Servo.h` bawaan Arduino IDE. Tutup Serial Monitor setelah upload (port tidak boleh dipakai dua proses).
+
+Konfigurasi penting di atas sketch:
+
+- Pin servo `SERVO_PIN = 9`.
+- Sudut `CLOSED_ANGLE = 20` dan `OPEN_ANGLE = 80` adalah nilai **contoh untuk uji tanpa beban**. Sesuaikan agar mekanisme tidak mentok.
+- Gerakan buka `OPEN_MS = 650` milidetik, lalu kembali tutup.
+- **Arduino menolak FEED kedua selama 60 detik**.
+- Pesan serial: `PING` → `PONG`; `FEED` → `ACK FEED` lalu `DONE`; `STATUS` → status. Port `115200 baud`, satu perintah per baris.
+
+### 2) Periksa port USB di Raspberry Pi
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+.venv/bin/python -m pip install pyserial
+ls -l /dev/serial/by-id/ /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
+.venv/bin/python -m serial.tools.list_ports
+```
+
+Arduino Uno asli biasanya `/dev/ttyACM0`; clone dengan chip USB-serial lain mungkin memakai `/dev/ttyUSB0`. Jika `Permission denied`:
+
+```bash
+sudo usermod -aG dialout yolo
+```
+
+Lalu **logout dari SSH dan login ulang** agar grup `dialout` aktif.
+
+### 3) Tes komunikasi sebelum menggerakkan servo
+
+```bash
+.venv/bin/python serial_servo_test.py --port /dev/ttyACM0
+```
+
+Tes di atas hanya `PING` dan `STATUS` (tidak menggerakkan servo). Jika sudah ada catu daya eksternal dan servo berada di meja tanpa beban, tes gerakan **satu kali**:
+
+```bash
+.venv/bin/python serial_servo_test.py --port /dev/ttyACM0 --feed
+```
+
+Output yang diharapkan: `PONG`, `STATUS IDLE`, `ACK FEED`. Jika mengulang sebelum 60 detik, Arduino membalas `ERR COOLDOWN`.
+
+### 4) Jalankan deteksi kucing → servo otomatis (uji tanpa pakan)
+
+Hentikan `pi5_ai_test.py` dan pastikan **tidak ada Serial Monitor atau program lain yang membuka port Arduino**. Di Raspberry Pi:
+
+```bash
+cd ~/smart-cat-feeder
+.venv/bin/python live_cam.py \
+  --source 0 \
+  --imgsz 320 \
+  --cat-only \
+  --arduino-port /dev/ttyACM0 \
+  --stable-hits 3 \
+  --cooldown-seconds 60 \
+  --rearm-seconds 5
+```
+
+Logika pengaman:
+
+1. Detektor YOLO11 melihat `cat` pada **3 hasil inferensi berturut-turut**, bukan hanya satu frame.
+2. Raspberry Pi mengirim `FEED\n` satu kali lewat USB serial.
+3. Arduino menerima `FEED`, memutar MG996R dari sudut tutup ke buka, lalu kembali menutup.
+4. Arduino dan Raspberry Pi menerapkan cooldown masing-masing; Pi juga menunggu kucing **menghilang minimal 5 detik** sebelum bisa terpicu lagi.
+5. **Membuka Serial Uno dapat me-reset Arduino**. Cooldown di memori Uno hilang jika Uno reset. Ini hanya aman untuk bench test tanpa makanan, bukan proteksi porsi permanen.
+
+Tanpa `--arduino-port`, `live_cam.py` **tidak mengirim perintah servo**.
+
+Di terminal **kedua pada laptop Parrot OS**:
+
+```bash
+ssh -N -L 8767:127.0.0.1:8767 yolo@yolo11.local
+```
+
+Buka **http://127.0.0.1:8767/** untuk melihat video dengan bounding box kucing dan status pengiriman perintah Arduino (balasan `ACK FEED` bukan bukti fisik bahwa servo benar-benar bergerak). Gunakan `Ctrl+C` pada terminal Pi untuk berhenti.
+
+### Jika terjadi masalah
+
+| Masalah | Pemeriksaan |
+| --- | --- |
+| `[ARDUINO OK]` tidak muncul | Sketch sudah di-upload? Port benar? Coba `serial_servo_test.py` dan `ls /dev/ttyACM* /dev/ttyUSB*`. |
+| `Permission denied` | Tambah `yolo` ke grup `dialout` kemudian login ulang. |
+| Port `busy` | Tutup Arduino IDE Serial Monitor dan hentikan program serial lain. |
+| `PONG` ada tetapi servo tidak bergerak | Cek **power eksternal 5–6V, common ground, pin D9, dan kabel signal**. |
+| Arduino restart saat servo bergerak | Biasanya catu daya servo tidak cukup atau wiring ground salah; jangan mengambil daya servo dari USB Uno/Pi. |
+| Kucing terdeteksi tetapi servo tidak bergerak | Periksa `cat_detection_streak` dan `last_serial_response` di `/status`, serta cooldown Arduino. |
+
+---
+
 ## Troubleshooting
 
 | Gejala | Penyelesaian |
@@ -115,7 +223,7 @@ Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka 
 
 ## Catatan proyek
 
-- Program **tidak** mengontrol Arduino/GPIO/servo dan **tidak** memberi makan kucing.
+- Program live camera **hanya mengirim perintah servo** jika opsi `--arduino-port` diaktifkan secara eksplisit. Mode standar tidak menggerakkan servo. Tidak ada pengukuran pakan atau kontrol porsi, jadi hanya untuk bench test tanpa makanan.
 - YOLO COCO mendeteksi objek, tetapi tidak memastikan kucing lapar atau menentukan porsi makan.
 - Sebelum membuat dispenser otomatis, tambahkan kalibrasi timbangan pakan, batas porsi, jadwal, cooldown, dan keamanan aktuator.
 - Perhatikan persyaratan lisensi Ultralytics untuk distribusi dan penggunaan komersial: https://www.ultralytics.com/license.
