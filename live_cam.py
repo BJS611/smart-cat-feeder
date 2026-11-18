@@ -5,7 +5,9 @@ Access localhost:8767 via SSH tunnel from your laptop.
 """
 import argparse
 import json
+import shutil
 import socket
+import subprocess
 import threading
 import time
 from collections import deque
@@ -39,6 +41,60 @@ class State:
         self.infer_times = deque(maxlen=100)
         self.error = None
         self.serial_info = {"enabled": False, "reason": "Arduino belum diaktifkan"}
+
+
+def configure_camera_exposure(source, allow_dynamic_fps=False, verify=False):
+    """Keep UVC webcam FPS stable when driver exposes the V4L2 priority control.
+
+    Applying the control before VideoCapture opens matches the measured Logitech
+    C270 fix (7-9 FPS became ~30 FPS). No model/servo parameters are changed.
+    """
+    source_text = str(source)
+    if source_text.isdecimal():
+        device = "/dev/video" + source_text
+    elif source_text.startswith("/dev/video") and source_text[10:].isdecimal():
+        device = source_text
+    else:
+        return  # URLs, files, or non-V4L2 sources have no /dev/videoN control.
+
+    if allow_dynamic_fps:
+        print("[CAMERA TUNE] Dynamic FPS diizinkan oleh --allow-dynamic-fps", flush=True)
+        return
+
+    ctl = shutil.which("v4l2-ctl")
+    if not ctl:
+        print("[CAMERA TUNE] v4l2-ctl tidak tersedia; lewati penguncian dynamic FPS", flush=True)
+        return
+
+    action = "--get-ctrl=exposure_dynamic_framerate" if verify else (
+        "--set-ctrl=exposure_dynamic_framerate=0"
+    )
+    try:
+        result = subprocess.run(
+            [ctl, "-d", device, action],
+            capture_output=True, text=True, timeout=3, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print("[CAMERA TUNE] Tidak dapat mengakses %s: %s" % (device, exc), flush=True)
+        return
+
+    if result.returncode != 0:
+        print(
+            "[CAMERA TUNE] %s tidak mendukung/menerima kontrol exposure: %s" %
+            (device, (result.stderr or result.stdout).strip()), flush=True
+        )
+        return
+
+    if verify:
+        actual = result.stdout.strip()
+        print("[CAMERA TUNE] %s -> %s" % (device, actual), flush=True)
+        if actual.rsplit(":", 1)[-1].strip() != "0":
+            print("[CAMERA TUNE] WARNING: dynamic FPS masih aktif!", flush=True)
+    else:
+        print(
+            "[CAMERA TUNE] Dynamic FPS OFF pada %s (exposure auto tetap aktif)" %
+            device, flush=True
+        )
 
 
 def recent_fps(samples, now, started_at):
@@ -341,6 +397,9 @@ def main():
                         help="Seconds between YOLO runs (0.4 = max 2.5 infer/s)")
     parser.add_argument("--camera-fps", type=int, default=30,
                         help="Requested camera FPS; actual V4L2 mode is logged")
+    parser.add_argument("--allow-dynamic-fps", action="store_true",
+                        help="Disable the automatic exposure FPS lock (default: lock off)")
+
     parser.add_argument("--camera-fourcc", choices=("MJPG", "YUYV", "AUTO"), default="MJPG",
                         help="Requested USB camera pixel format (default MJPG)")
     parser.add_argument("--stream-fps", type=float, default=15.0,
@@ -374,11 +433,15 @@ def main():
         parser.error("Port, confidence, resolusi, atau interval tidak valid")
 
     import cv2
+    # Apply BEFORE OpenCV opens V4L2; on the Logitech C270 this prevents
+    # auto-exposure from silently dropping capture to ~7.5 FPS.
+    configure_camera_exposure(args.source, args.allow_dynamic_fps)
     model = load_detector()
     cap = open_camera(
         cv2, args.source, fps=args.camera_fps,
         fourcc=args.camera_fourcc,
     )
+    configure_camera_exposure(args.source, args.allow_dynamic_fps, verify=True)
     actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 255)
                          if 32 <= ((actual_fourcc >> (8 * i)) & 255) <= 126 else "?"
