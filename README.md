@@ -115,6 +115,42 @@ Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka 
 
 **Uji pertama tanpa memasang lengan servo ke mekanisme dispenser, dan tanpa makanan.** Program ini belum memakai HX711/load cell; gerakan servo tidak menjamin gram pakan tertentu. Jangan gunakan sebagai feeder otomatis tanpa batasan mekanis, porsi dan pengujian keselamatan.
 
+### Dua LED indikator Arduino Uno (hijau / kuning)
+
+Firmware terbaru pada **kedua** sketch (normal 60 s dan bench 5 s) menyediakan LED indikator:
+
+| Keadaan | Hijau (D4) | Kuning (D5) |
+| --- | --- | --- |
+| Arduino siap / Idle | ON | OFF |
+| YOLO11 mendeteksi kucing dan Arduino sedang menjalankan FEED | OFF | ON |
+| Pushbutton manual D2 men-trigger servo ("Emergency feed") | OFF | ON |
+| Perintah serial `EMERGENCY` (software lock, tidak menggerakkan servo) | OFF | ON hingga `RESET` |
+| Servo selesai dan status kembali Idle | ON | OFF |
+
+**Sambungan LED standar 3–5 mm** (masing-masing wajib resistor seri 220–330 Ω):
+
+- `Arduino D4 -> resistor 220–330 Ω -> anoda (+, kaki panjang) LED hijau; katoda (-, kaki pendek) -> GND Arduino`.
+- `Arduino D5 -> resistor 220–330 Ω -> anoda (+, kaki panjang) LED kuning; katoda (-, kaki pendek) -> GND Arduino`.
+
+Gunakan dua resistor terpisah, satu untuk setiap LED. LED ini dikontrol langsung oleh Arduino, jadi tetap merespons tombol D2 tanpa Raspberry Pi terhubung. **Jika indikator yang digunakan adalah lampu industri 12/24V atau modul LED berarus tinggi, jangan hubungkan langsung ke pin Arduino**: gunakan driver transistor/MOSFET/relay yang sesuai tegangan dan arus.
+
+LCD I2C tetap opsional dan tidak menghalangi LED ketika dilepas. LED kuning merepresentasikan status *Feeding* / *Emergency* yang berbagi satu indikator, bukan bukti servo benar-benar bergerak.
+
+Setelah `git pull --ff-only`, **compile dan upload firmware Arduino lagi sekali** agar dua pin LED aktif:
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+
+# Untuk uji bench tanpa makanan, sesuai firmware 5 detik:
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+Setelah upload, **hijau harus menyala**. Menekan tombol D2 atau memicu FEED lewat YOLO11 menyalakan **kuning hanya selama servo bekerja**; setelah siklus selesai, hijau menyala lagi. Mode software lock `EMERGENCY` menahan kuning sampai `RESET`.
+
 ### Tombol pemberian pakan manual darurat (Arduino D2)
 
 **Istilah penting:** tombol ini adalah **MANUAL FEED OVERRIDE**, yang menggerakkan servo saat ditekan. **Bukan emergency stop**, bukan pemutus daya, dan bukan mekanisme pengaman keselamatan mesin.
