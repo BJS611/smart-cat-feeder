@@ -53,6 +53,21 @@ class GateTests(unittest.TestCase):
             gate.observe(True, now=now)
         self.assertEqual(bridge.calls, 2)
 
+    def test_short_cooldown_requires_explicit_bench_mode(self):
+        bridge = FakeBridge()
+        with self.assertRaises(ValueError):
+            CatGate(bridge, stable_hits=3, cooldown_seconds=5)
+        gate = CatGate(bridge, stable_hits=3, absence_seconds=5,
+                       cooldown_seconds=5, bench_test=True)
+        for now in [0, 1, 2]:
+            gate.observe(True, now=now)
+        self.assertEqual(bridge.calls, 1)
+        gate.observe(False, now=3)
+        gate.observe(False, now=8)
+        for now in [9, 10, 11]:
+            gate.observe(True, now=now)
+        self.assertEqual(bridge.calls, 2)
+
     def test_rejected_command_is_not_repeated_without_absence(self):
         bridge = FakeBridge(accepted=False)
         gate = CatGate(bridge, stable_hits=3)
