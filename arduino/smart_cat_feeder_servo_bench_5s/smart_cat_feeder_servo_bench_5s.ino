@@ -13,6 +13,11 @@
 const uint8_t SERVO_PIN = 9;
 const uint8_t LED_GREEN_PIN = 4;    // Green: Idle (normal, not moving)
 const uint8_t LED_YELLOW_PIN = 5;   // Yellow: Feeding or manual Emergency
+const uint8_t IR_SENSOR_PIN = 6;    // IR obstacle module digital OUT / DO
+const uint8_t LED_RED_PIN = 7;      // Red: food below minimum level / not yet verified
+const uint8_t IR_FOOD_PRESENT_LEVEL = LOW; // Common FC-51: LOW when pellets are in front
+const unsigned long FOOD_EMPTY_CONFIRM_MS = 3000UL;
+const unsigned long FOOD_PRESENT_CONFIRM_MS = 800UL;
 const uint8_t MANUAL_BUTTON_PIN = 2;       // Momentary NO push button: D2 <-> GND
 const unsigned long BUTTON_DEBOUNCE_MS = 35UL;
 const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid presses
@@ -44,6 +49,13 @@ unsigned long lastButtonChangeAt = 0;
 unsigned long lastManualAt = 0;
 bool manualHasRun = false;
 bool manualCycle = false;
+
+// Unconfirmed startup state is a warning. Never assume food exists until
+// sensor reading stays stable for FOOD_PRESENT_CONFIRM_MS.
+bool foodLevelKnown = false;
+bool foodPresent = false;
+bool foodRawPresent = false;
+unsigned long foodRawChangedAt = 0;
 
 void showScreen(ScreenState next) {
   if (lcd == nullptr) {
@@ -107,12 +119,55 @@ bool hasFed = false;
 char lineBuffer[24];
 uint8_t lineLength = 0;
 
-// Exclusive LEDs: GREEN only while truly idle; YELLOW for movement
-// (YOLO FEED or D2 manual button), or during latched software EMERGENCY.
+// LED priority: yellow = servo movement or software emergency lock;
+// red = low/unknown food; green = confirmed food present and idle.
+// Red can remain ON together with yellow if the hopper is empty.
 void updateStatusLEDs() {
   const bool active = (servoState != IDLE) || emergencyActive;
-  digitalWrite(LED_GREEN_PIN, active ? LOW : HIGH);
+  const bool lowOrUnknown = !foodLevelKnown || !foodPresent;
+  digitalWrite(LED_GREEN_PIN, (!active && !lowOrUnknown) ? HIGH : LOW);
   digitalWrite(LED_YELLOW_PIN, active ? HIGH : LOW);
+  digitalWrite(LED_RED_PIN, lowOrUnknown ? HIGH : LOW);
+}
+
+// Poll the IR module non-blockingly, ignoring brief gaps between pellets.
+// Digital modules usually output LOW when they detect a nearby object.
+// Sensor is only a LOW-LEVEL INDICATOR, not an accurate measure of food mass.
+void updateFoodSensor() {
+  const unsigned long now = millis();
+  const bool observedFood = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
+  if (observedFood != foodRawPresent) {
+    foodRawPresent = observedFood;
+    foodRawChangedAt = now;
+  }
+
+  if (foodLevelKnown && observedFood == foodPresent) return;
+
+  const unsigned long stableFor =
+      observedFood ? FOOD_PRESENT_CONFIRM_MS : FOOD_EMPTY_CONFIRM_MS;
+  if ((unsigned long)(now - foodRawChangedAt) < stableFor) return;
+
+  foodPresent = observedFood;
+  foodLevelKnown = true;
+  updateStatusLEDs();
+  if (foodPresent) {
+    Serial.println(F("FOOD PRESENT"));
+  } else {
+    Serial.println(F("FOOD EMPTY"));
+  }
+}
+
+void printFoodStatus() {
+  Serial.print(F("FOOD_STATUS RAW="));
+  Serial.print(digitalRead(IR_SENSOR_PIN) == LOW ? F("LOW") : F("HIGH"));
+  Serial.print(F(" STATE="));
+  if (!foodLevelKnown) {
+    Serial.println(F("CHECKING"));
+  } else if (foodPresent) {
+    Serial.println(F("PRESENT"));
+  } else {
+    Serial.println(F("EMPTY"));
+  }
 }
 
 // Shared servo state machine, preserving existing FEED serial protocol.
@@ -198,6 +253,10 @@ void scanI2CBus() {
 }
 
 void handleCommand(const char *command) {
+  if (strcmp(command, "FOOD_STATUS") == 0) {
+    printFoodStatus();
+    return;
+  }
   if (strcmp(command, "I2C_SCAN") == 0) {
     scanI2CBus();
     return;
@@ -314,7 +373,11 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_YELLOW_PIN, OUTPUT);
-  updateStatusLEDs(); // Boot in Idle: green ON, yellow OFF.
+  pinMode(LED_RED_PIN, OUTPUT);
+  pinMode(IR_SENSOR_PIN, INPUT_PULLUP); // Typical LM393 open-collector OUT
+  foodRawPresent = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
+  foodRawChangedAt = millis();
+  updateStatusLEDs(); // Red until food is verified, then green when idle.
   pinMode(MANUAL_BUTTON_PIN, INPUT_PULLUP);
   lastButtonRaw = digitalRead(MANUAL_BUTTON_PIN);
   stableButton = lastButtonRaw;
@@ -331,6 +394,7 @@ void setup() {
 }
 
 void loop() {
+  updateFoodSensor();
   updateManualButton();
   readSerialCommands();
   updateServo();
