@@ -23,12 +23,26 @@ def main():
         "--i2c-scan", action="store_true",
         help="Scan Arduino Uno A4/A5 for connected I2C devices; no servo movement"
     )
+    actions.add_argument(
+        "--button-monitor", action="store_true",
+        help="Monitor Arduino serial events while pressing the physical D2 button"
+    )
     args = parser.parse_args()
     bridge = ArduinoBridge(args.port)
     try:
         print("[PING]", "OK" if bridge.ping() else "FAILED", flush=True)
         print("[STATUS]", bridge.status(), flush=True)
-        if args.i2c_scan:
+        if args.button_monitor:
+            print("[BUTTON] Tekan tombol D2 ke GND. Servo bergerak dari tombol, bukan Python.", flush=True)
+            print("[BUTTON] Ctrl+C untuk berhenti.", flush=True)
+            try:
+                while True:
+                    message = bridge.serial.readline().decode("ascii", errors="replace").strip()
+                    if message:
+                        print("[ARDUINO]", message, flush=True)
+            except KeyboardInterrupt:
+                print("\n[BUTTON] Monitor selesai.", flush=True)
+        elif args.i2c_scan:
             print("[I2C] Memindai bus A4(SDA) / A5(SCL)...", flush=True)
             devices = bridge.scan_i2c()
             if devices:
