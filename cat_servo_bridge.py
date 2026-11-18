@@ -102,6 +102,23 @@ class ArduinoBridge:
         )
         return reply == "ACK FEED", reply
 
+    def food_status(self, timeout=2.0):
+        """Read IR sensor and confirmed food state; never commands servo movement."""
+        self._write("FOOD_STATUS\n")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.serial.readline().decode("ascii", errors="replace").strip()
+            if not line:
+                continue
+            if line.startswith("FOOD_STATUS "):
+                return line
+            print("[ARDUINO]", line, flush=True)
+            if line == "ERR UNKNOWN_COMMAND":
+                raise RuntimeError(
+                    "Firmware Arduino lama belum mendukung FOOD_STATUS. Upload sketch terbaru."
+                )
+        raise RuntimeError("Arduino tidak membalas FOOD_STATUS; cek firmware/port.")
+
     def scan_i2c(self, timeout=8.0):
         """Scan Arduino Uno I2C bus (A4/A5). Does not actuate the servo."""
         self.serial.reset_input_buffer()
