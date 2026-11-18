@@ -1,4 +1,6 @@
 #include <Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
 // BENCH TEST ONLY - Arduino Uno MG996R, cooldown 5 seconds.
 // DO NOT connect to a hopper or use this version to dispense food.
@@ -15,6 +17,34 @@ const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 5000UL; // BENCH TEST ONLY: 5 s between FEEDs
 
 Servo feederServo;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Status LCD follows the existing servo state. Emergency button is NOT used yet.
+enum ScreenState : uint8_t { SCREEN_IDLE, SCREEN_FEEDING, SCREEN_EMERGENCY };
+ScreenState screenState = SCREEN_IDLE;
+bool lcdReady = false;
+bool emergencyActive = false;
+
+void showScreen(ScreenState next) {
+  if (lcdReady && screenState == next) return;
+
+  lcd.setCursor(0, 0);
+  lcd.print(F("SMART CAT FEEDER")); // Exactly 16 characters
+  lcd.setCursor(0, 1);
+  lcd.print(F("                ")); // Clear old status without flicker
+  lcd.setCursor(0, 1);
+
+  if (next == SCREEN_FEEDING) {
+    lcd.print(F("Feeding"));
+  } else if (next == SCREEN_EMERGENCY) {
+    lcd.print(F("Emergency"));
+  } else {
+    lcd.print(F("Idle"));
+  }
+  screenState = next;
+  lcdReady = true;
+}
+
 
 enum ServoState : uint8_t {
   IDLE,
@@ -31,7 +61,9 @@ char lineBuffer[24];
 uint8_t lineLength = 0;
 
 void printStatus() {
-  if (servoState == OPENING) {
+  if (emergencyActive) {
+    Serial.println(F("STATUS EMERGENCY"));
+  } else if (servoState == OPENING) {
     Serial.println(F("STATUS OPENING"));
   } else if (servoState == CLOSING) {
     Serial.println(F("STATUS CLOSING"));
@@ -51,7 +83,32 @@ void handleCommand(const char *command) {
     return;
   }
 
+  if (strcmp(command, "EMERGENCY") == 0) {
+    // LCD emergency test only; physical button to be added later.
+    emergencyActive = true;
+    feederServo.write(CLOSED_ANGLE);
+    servoState = IDLE;
+    digitalWrite(LED_BUILTIN, LOW);
+    showScreen(SCREEN_EMERGENCY);
+    Serial.println(F("ACK EMERGENCY"));
+    return;
+  }
+
+  if (strcmp(command, "RESET") == 0) {
+    emergencyActive = false;
+    feederServo.write(CLOSED_ANGLE);
+    servoState = IDLE;
+    digitalWrite(LED_BUILTIN, LOW);
+    showScreen(SCREEN_IDLE);
+    Serial.println(F("ACK RESET"));
+    return;
+  }
+
   if (strcmp(command, "FEED") == 0) {
+    if (emergencyActive) {
+      Serial.println(F("ERR EMERGENCY"));
+      return;
+    }
     const unsigned long now = millis();
 
     if (servoState != IDLE) {
@@ -68,6 +125,7 @@ void handleCommand(const char *command) {
     hasFed = true;
     stageStartedAt = now;
     servoState = OPENING;
+    showScreen(SCREEN_FEEDING);
     feederServo.write(OPEN_ANGLE);
     digitalWrite(LED_BUILTIN, HIGH);
     Serial.println(F("ACK FEED"));
@@ -117,11 +175,17 @@ void updateServo() {
       (unsigned long)(now - stageStartedAt) >= CLOSE_SETTLE_MS) {
     servoState = IDLE;
     digitalWrite(LED_BUILTIN, LOW);
+    showScreen(SCREEN_IDLE);
     Serial.println(F("DONE"));
   }
 }
 
 void setup() {
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+  showScreen(SCREEN_IDLE);
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
