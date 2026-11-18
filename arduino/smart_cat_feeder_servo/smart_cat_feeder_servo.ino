@@ -4,10 +4,14 @@
 
 // Smart Cat Feeder - Arduino Uno R3 (MG996R prototype)
 // Serial over USB at 115200 baud.
-// The servo moves ONLY when a complete "FEED\n" command is received.
+// Automatic FEED uses USB serial; D2 manual button works even when Pi is offline.
+// One press = one servo cycle, debounced. NO FOOD / BENCH TEST ONLY.
 // Does not dispense controlled portions; bench-test without the hopper attached.
 
 const uint8_t SERVO_PIN = 9;
+const uint8_t MANUAL_BUTTON_PIN = 2;       // Momentary NO push button: D2 <-> GND
+const unsigned long BUTTON_DEBOUNCE_MS = 35UL;
+const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid presses
 const uint8_t CLOSED_ANGLE = 20;     // Adjust before mounting the servo horn
 const uint8_t OPEN_ANGLE = 80;       // Adjust to avoid mechanical stops
 const unsigned long OPEN_MS = 650UL;
@@ -15,32 +19,73 @@ const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 60000UL; // Hard minimum between accepted FEEDs
 
 Servo feederServo;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Status LCD follows the existing servo state. Emergency button is NOT used yet.
+// Keep both LCD addresses ready, but don't talk to the LCD when absent.
+// Broken/borrowed LCD should be physically disconnected for now.
+LiquidCrystal_I2C lcd27(0x27, 16, 2);
+LiquidCrystal_I2C lcd3f(0x3F, 16, 2);
+LiquidCrystal_I2C *lcd = nullptr;
+
 enum ScreenState : uint8_t { SCREEN_IDLE, SCREEN_FEEDING, SCREEN_EMERGENCY };
 ScreenState screenState = SCREEN_IDLE;
 bool lcdReady = false;
+
+// Serial "EMERGENCY" means a latched software STOP that blocks FEED.
+// The D2 pushbutton means MANUAL EMERGENCY FEED (not a safety E-stop).
 bool emergencyActive = false;
 
+bool lastButtonRaw = HIGH;
+bool stableButton = HIGH;
+unsigned long lastButtonChangeAt = 0;
+unsigned long lastManualAt = 0;
+bool manualHasRun = false;
+bool manualCycle = false;
+
 void showScreen(ScreenState next) {
+  if (lcd == nullptr) {
+    screenState = next;
+    return;
+  }
   if (lcdReady && screenState == next) return;
 
-  lcd.setCursor(0, 0);
-  lcd.print(F("SMART CAT FEEDER")); // Exactly 16 characters
-  lcd.setCursor(0, 1);
-  lcd.print(F("                ")); // Clear old status without flicker
-  lcd.setCursor(0, 1);
-
+  lcd->setCursor(0, 0);
+  lcd->print(F("SMART CAT FEEDER")); // 16 characters
+  lcd->setCursor(0, 1);
+  lcd->print(F("                "));
+  lcd->setCursor(0, 1);
   if (next == SCREEN_FEEDING) {
-    lcd.print(F("Feeding"));
+    lcd->print(F("Feeding"));
   } else if (next == SCREEN_EMERGENCY) {
-    lcd.print(F("Emergency"));
+    lcd->print(F("Emergency"));
   } else {
-    lcd.print(F("Idle"));
+    lcd->print(F("Idle"));
   }
   screenState = next;
   lcdReady = true;
+}
+
+bool i2cPresent(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission() == 0;
+}
+
+void initOptionalLCD() {
+  Wire.begin();
+  if (i2cPresent(0x27)) {
+    lcd = &lcd27;
+    Serial.println(F("LCD FOUND 0x27"));
+  } else if (i2cPresent(0x3F)) {
+    lcd = &lcd3f;
+    Serial.println(F("LCD FOUND 0x3F"));
+  } else {
+    lcd = nullptr;
+    Serial.println(F("LCD NOT CONNECTED - continue without LCD"));
+    return;
+  }
+  lcd->init();
+  lcd->backlight();
+  lcdReady = false;
+  showScreen(screenState);
 }
 
 
@@ -57,6 +102,55 @@ bool hasFed = false;
 
 char lineBuffer[24];
 uint8_t lineLength = 0;
+
+// Shared servo state machine, preserving existing FEED serial protocol.
+void startServoCycle(bool manual) {
+  const unsigned long now = millis();
+  stageStartedAt = now;
+  servoState = OPENING;
+  manualCycle = manual;
+  if (manual) {
+    lastManualAt = now;
+    manualHasRun = true;
+    showScreen(SCREEN_EMERGENCY);
+    Serial.println(F("EVENT MANUAL_FEED"));
+  } else {
+    lastFeedAt = now;
+    hasFed = true;
+    showScreen(SCREEN_FEEDING);
+  }
+  feederServo.write(OPEN_ANGLE);
+  digitalWrite(LED_BUILTIN, HIGH);
+}
+
+void updateManualButton() {
+  const bool raw = digitalRead(MANUAL_BUTTON_PIN);
+  const unsigned long now = millis();
+
+  if (raw != lastButtonRaw) {
+    lastButtonRaw = raw;
+    lastButtonChangeAt = now;
+  }
+
+  if (raw != stableButton &&
+      (unsigned long)(now - lastButtonChangeAt) >= BUTTON_DEBOUNCE_MS) {
+    stableButton = raw;
+
+    // HIGH->LOW stable edge: one cycle per fresh button press.
+    if (stableButton == LOW) {
+      if (emergencyActive) {
+        Serial.println(F("MANUAL_IGNORED EMERGENCY_LOCK"));
+      } else if (servoState != IDLE) {
+        Serial.println(F("MANUAL_IGNORED BUSY"));
+      } else if (manualHasRun &&
+                 (unsigned long)(now - lastManualAt) < MANUAL_ANTI_REPEAT_MS) {
+        Serial.println(F("MANUAL_IGNORED ANTI_REPEAT"));
+      } else {
+        startServoCycle(true); // Bypasses YOLO and automatic cooldown
+      }
+    }
+  }
+}
 
 void printStatus() {
   if (emergencyActive) {
@@ -108,6 +202,7 @@ void handleCommand(const char *command) {
     emergencyActive = true;
     feederServo.write(CLOSED_ANGLE);
     servoState = IDLE;
+    manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
     showScreen(SCREEN_EMERGENCY);
     Serial.println(F("ACK EMERGENCY"));
@@ -118,6 +213,7 @@ void handleCommand(const char *command) {
     emergencyActive = false;
     feederServo.write(CLOSED_ANGLE);
     servoState = IDLE;
+    manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
     showScreen(SCREEN_IDLE);
     Serial.println(F("ACK RESET"));
@@ -140,14 +236,8 @@ void handleCommand(const char *command) {
       return;
     }
 
-    // Accept exactly one rotation cycle.
-    lastFeedAt = now;
-    hasFed = true;
-    stageStartedAt = now;
-    servoState = OPENING;
-    showScreen(SCREEN_FEEDING);
-    feederServo.write(OPEN_ANGLE);
-    digitalWrite(LED_BUILTIN, HIGH);
+    // Keep original automatic FEED cooldown, independent of manual presses.
+    startServoCycle(false);
     Serial.println(F("ACK FEED"));
     return;
   }
@@ -195,29 +285,32 @@ void updateServo() {
       (unsigned long)(now - stageStartedAt) >= CLOSE_SETTLE_MS) {
     servoState = IDLE;
     digitalWrite(LED_BUILTIN, LOW);
-    showScreen(SCREEN_IDLE);
+    manualCycle = false;
+    showScreen(emergencyActive ? SCREEN_EMERGENCY : SCREEN_IDLE);
     Serial.println(F("DONE"));
   }
 }
 
 void setup() {
-  Wire.begin();
-  lcd.init();
-  lcd.backlight();
-  showScreen(SCREEN_IDLE);
-
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
+  pinMode(MANUAL_BUTTON_PIN, INPUT_PULLUP);
+  lastButtonRaw = digitalRead(MANUAL_BUTTON_PIN);
+  stableButton = lastButtonRaw;
+  lastButtonChangeAt = millis();
 
-  // Set target before attaching: reduce unexpected travel at startup.
+  // Set closed target before attach to reduce unwanted movement at boot.
   feederServo.write(CLOSED_ANGLE);
   feederServo.attach(SERVO_PIN);
   Serial.begin(115200);
+  initOptionalLCD();
+  showScreen(SCREEN_IDLE);
   Serial.println(F("READY SMART_CAT_FEEDER_V1"));
   Serial.println(F("SAFE MODE: BENCH TEST ONLY / NO WEIGHT CONTROL"));
 }
 
 void loop() {
+  updateManualButton();
   readSerialCommands();
   updateServo();
 }
