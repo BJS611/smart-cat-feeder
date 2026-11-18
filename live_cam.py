@@ -1,199 +1,152 @@
 #!/usr/bin/env python3
-"""Live MJPEG webcam + YOLO11 cat detection + experimental cat age estimation.
-Runs locally on Raspberry Pi 5; browse remotely via SSH port forwarding.
-No servo, Arduino, GPIO or feeding commands are used.
+"""Browser live camera: ONE YOLO11 object detector only.
+No age model, no previous detector checkpoint, no GPIO / servo operation.
+Access localhost:8767 via SSH tunnel from your laptop.
 """
 import argparse
 import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-from pi5_ai_test import load_models, open_camera
+from yolo11_runtime import draw_boxes, load_detector, open_camera, predict_boxes
 
 
-class Shared:
+class State:
     def __init__(self):
-        self.condition = threading.Condition()
+        self.lock = threading.Condition()
         self.stop = threading.Event()
         self.raw = None
         self.jpeg = None
-        self.sequence = 0
+        self.seq = 0
         self.boxes = []
-        self.age = None
-        self.age_conf = None
-        self.det_ms = 0.0
-        self.age_ms = 0.0
+        self.frame_count = 0
         self.inferences = 0
-        self.frames = 0
+        self.det_ms = None
         self.error = None
 
 
-def capture_worker(state, cap, cv2):
-    last_print = time.monotonic()
+def camera_worker(state, cap, cv2):
     try:
+        last_report = time.monotonic()
         while not state.stop.is_set():
             ok, frame = cap.read()
             if not ok:
-                state.error = "Webcam tidak menghasilkan frame; cek /dev/video*."
+                state.error = "Webcam tidak mengirim frame."
                 break
-
-            with state.condition:
+            with state.lock:
                 state.raw = frame.copy()
                 boxes = list(state.boxes)
-                age, age_conf = state.age, state.age_conf
-                state.frames += 1
-
-            for x1, y1, x2, y2, confidence in boxes:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 210, 40), 2)
-                cv2.putText(
-                    frame, "CAT %.2f" % confidence, (x1, max(20, y1 - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (30, 210, 40), 2
-                )
-            if age is not None:
-                cv2.putText(
-                    frame, "Estimasi: %s (%.2f)" % (age, age_conf),
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 225, 255), 2
-                )
-            ok, encoded = cv2.imencode(
-                ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75]
+                state.frame_count += 1
+            draw_boxes(cv2, frame, boxes)
+            encoded_ok, encoded = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
             )
-            if ok:
-                with state.condition:
+            if encoded_ok:
+                with state.lock:
                     state.jpeg = encoded.tobytes()
-                    state.sequence += 1
-                    state.condition.notify_all()
-            # Prevent excessive CPU use on very fast webcams.
-            time.sleep(0.025)
-            if time.monotonic() - last_print >= 10:
-                print("[CAMERA] frames=%d, inferensi=%d, kucing=%d" %
-                      (state.frames, state.inferences, len(boxes)), flush=True)
-                last_print = time.monotonic()
+                    state.seq += 1
+                    state.lock.notify_all()
+            if time.monotonic() - last_report > 10:
+                print("[CAMERA] frames=%d, inferensi=%d, objek=%d" %
+                      (state.frame_count, state.inferences, len(boxes)), flush=True)
+                last_report = time.monotonic()
+            time.sleep(0.03)
     except Exception as exc:
-        state.error = "Capture error: %s" % exc
+        state.error = "Camera error: %s" % exc
         print("[ERROR]", state.error, flush=True)
     finally:
         state.stop.set()
-        with state.condition:
-            state.condition.notify_all()
+        with state.lock:
+            state.lock.notify_all()
         cap.release()
 
 
-def inference_worker(state, detector, classifier, args):
+def inference_worker(state, model, args):
     while not state.stop.is_set():
-        start = time.perf_counter()
-        with state.condition:
+        with state.lock:
             frame = None if state.raw is None else state.raw.copy()
         if frame is None:
             state.stop.wait(0.1)
             continue
+        begin = time.perf_counter()
         try:
-            h, w = frame.shape[:2]
-            result = detector.predict(
-                frame, imgsz=args.imgsz, conf=args.conf,
-                classes=[15], device="cpu", verbose=False
-            )[0]
-            det_ms = (time.perf_counter() - start) * 1000
-            boxes = []
-            if result.boxes is not None:
-                for b in result.boxes:
-                    x1, y1, x2, y2 = map(int, b.xyxy[0].tolist())
-                    x1, x2 = max(0, x1), min(w - 1, x2)
-                    y1, y2 = max(0, y1), min(h - 1, y2)
-                    if x2 > x1 and y2 > y1:
-                        boxes.append((x1, y1, x2, y2, float(b.conf[0])))
-
-            age_label = age_conf = None
-            age_ms = 0.0
-            if boxes:
-                biggest = max(boxes, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
-                x1, y1, x2, y2, _ = biggest
-                t1 = time.perf_counter()
-                age_result = classifier.predict(
-                    frame[y1:y2, x1:x2], imgsz=320,
-                    device="cpu", verbose=False
-                )[0]
-                age_ms = (time.perf_counter() - t1) * 1000
-                if age_result.probs is not None:
-                    age_label = classifier.names[int(age_result.probs.top1)]
-                    age_conf = float(age_result.probs.top1conf)
-
-            with state.condition:
+            boxes = predict_boxes(
+                model, frame, imgsz=args.imgsz,
+                conf=args.conf, cat_only=args.cat_only
+            )
+            dt_ms = (time.perf_counter() - begin) * 1000.0
+            with state.lock:
                 state.boxes = boxes
-                state.age = age_label
-                state.age_conf = age_conf
-                state.det_ms = round(det_ms, 1)
-                state.age_ms = round(age_ms, 1)
                 state.inferences += 1
+                state.det_ms = round(dt_ms, 1)
         except Exception as exc:
             state.error = "Inference error: %s" % exc
             print("[ERROR]", state.error, flush=True)
             state.stop.set()
-            with state.condition:
-                state.condition.notify_all()
-            break
-
-        # Minimum delay between inference passes, not FPS.
-        state.stop.wait(max(0, args.interval - (time.perf_counter() - start)))
+            with state.lock:
+                state.lock.notify_all()
+            return
+        state.stop.wait(max(0, args.interval - (time.perf_counter() - begin)))
 
 
-HTML = """<!doctype html>
-<html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smart Cat Feeder — Live AI</title>
-<style>
-body{background:#101827;color:#edf2f8;font:16px system-ui,sans-serif;
-  max-width:900px;margin:30px auto;padding:0 16px}
-img{display:block;width:100%;max-width:800px;background:#000;border-radius:10px}
-pre{white-space:pre-wrap;background:#1d293a;padding:15px;border-radius:10px}
-small{color:#b5c3d6}
+PAGE = """<!doctype html><html lang="id"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Cat Feeder — YOLO11 Live</title><style>
+body{background:#111827;color:#eef2ff;font:16px system-ui,sans-serif;
+max-width:940px;margin:24px auto;padding:0 14px}
+img{display:block;width:100%;max-width:900px;border-radius:10px;background:#000}
+pre{white-space:pre-wrap;background:#1e293b;border-radius:10px;padding:12px}
+small{color:#cbd5e1}
 </style></head><body>
-<h2>Smart Cat Feeder · Live Camera</h2>
-<p><small>Raspberry Pi 5 · YOLO11n + YOLO11s-cls · Tidak menggerakkan servo</small></p>
-<img src="/stream.mjpg" alt="Live webcam">
+<h2>YOLO11 · Live Object Detection</h2>
+<p><small>Hanya satu model YOLO11; tidak ada klasifikasi usia dan kontrol servo.</small></p>
+<img src="/stream.mjpg" alt="Webcam live YOLO11">
 <h3>Status</h3><pre id="status">Menghubungkan...</pre>
-<p><small>Label usia hanya perkiraan AI. Jangan gunakan untuk menentukan porsi makan.</small></p>
 <script>
-async function refresh(){try{
- const r=await fetch('/status',{cache:'no-store'});
- document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2);
-}catch(e){document.getElementById('status').textContent='Koneksi terputus: '+e;}}
-refresh();setInterval(refresh,2000);
+async function update(){try{
+let r=await fetch('/status',{cache:'no-store'});
+document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2);
+}catch(e){document.getElementById('status').textContent='Disconnected: '+e;}}
+update();setInterval(update,2000);
 </script></body></html>"""
 
 
-def make_handler(state):
+def make_handler(state, cat_only):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             path = self.path.split("?", 1)[0]
             if path == "/":
-                body = HTML.encode("utf-8")
+                data = PAGE.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(data)
             elif path == "/status":
-                with state.condition:
-                    payload = {
-                        "camera_frames": state.frames,
+                with state.lock:
+                    detections = [
+                        {"class": b[5], "confidence": round(b[6], 3)}
+                        for b in state.boxes
+                    ]
+                    data = {
+                        "model": "models/yolo11.pt",
+                        "mode": "cat-only" if cat_only else "all-classes",
+                        "camera_frames": state.frame_count,
                         "inferences": state.inferences,
-                        "detected_cats": len(state.boxes),
-                        "age_estimate": state.age,
-                        "age_confidence": state.age_conf,
                         "detection_ms": state.det_ms,
-                        "age_ms": state.age_ms,
+                        "detections": detections,
                         "error": state.error,
+                        "age_classifier_loaded": False,
                         "servo_activated": False,
                     }
-                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(payload)
             elif path == "/stream.mjpg":
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -202,20 +155,21 @@ def make_handler(state):
                 seen = -1
                 try:
                     while not state.stop.is_set():
-                        with state.condition:
-                            state.condition.wait_for(
-                                lambda: state.sequence != seen or state.stop.is_set(),
+                        with state.lock:
+                            state.lock.wait_for(
+                                lambda: state.seq != seen or state.stop.is_set(),
                                 timeout=5
                             )
                             if state.stop.is_set():
                                 break
-                            seen, img = state.sequence, state.jpeg
-                        if img is None:
+                            seen = state.seq
+                            frame = state.jpeg
+                        if frame is None:
                             continue
                         self.wfile.write(
-                            b"--frame\r\nContent-Type: image/jpeg\r\n"
-                            + ("Content-Length: %d\r\n\r\n" % len(img)).encode()
-                            + img + b"\r\n"
+                            b"--frame\r\nContent-Type: image/jpeg\r\n" +
+                            ("Content-Length: %d\r\n\r\n" % len(frame)).encode() +
+                            frame + b"\r\n"
                         )
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, OSError):
@@ -223,56 +177,56 @@ def make_handler(state):
             else:
                 self.send_error(404)
 
-        def log_message(self, fmt, *args):
-            # Avoid logging each request every few seconds.
+        def log_message(self, fmt, *values):
             if self.path.split("?", 1)[0] not in ("/status", "/stream.mjpg"):
-                super().log_message(fmt, *args)
+                super().log_message(fmt, *values)
 
     return Handler
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live webcam + YOLO via browser SSH tunnel")
-    parser.add_argument("--source", default="0", help="Webcam index /dev/videoN")
+    parser = argparse.ArgumentParser(description="YOLO11 live stream, single detection model")
+    parser.add_argument("--source", default="0", help="Camera index, /dev/videoN, or stream URL")
     parser.add_argument("--port", type=int, default=8767)
     parser.add_argument("--imgsz", type=int, default=320)
-    parser.add_argument("--conf", type=float, default=0.40)
-    parser.add_argument("--interval", type=float, default=0.4,
-                        help="Minimum gap between AI passes in seconds")
+    parser.add_argument("--conf", type=float, default=0.4)
+    parser.add_argument("--interval", type=float, default=0.4)
+    parser.add_argument("--cat-only", action="store_true",
+                        help="Only show COCO class 'cat' (15); default all 80 classes")
     args = parser.parse_args()
     if not (1 <= args.port <= 65535 and 0 < args.conf < 1
             and args.imgsz >= 32 and args.interval >= 0):
-        parser.error("Port/confidence/resolusi/interval tidak valid")
+        parser.error("Port, confidence, resolusi, atau interval tidak valid")
 
     import cv2
-    state = Shared()
-    det, age = load_models()
+    model = load_detector()
     cap = open_camera(cv2, args.source)
-    print("[CAMERA OK] source=%s" % args.source, flush=True)
+    print("[CAMERA OK] %s" % args.source, flush=True)
+    state = State()
     capture = threading.Thread(
-        target=capture_worker, args=(state, cap, cv2), daemon=True
+        target=camera_worker, args=(state, cap, cv2), daemon=True
     )
     infer = threading.Thread(
-        target=inference_worker, args=(state, det, age, args), daemon=True
+        target=inference_worker, args=(state, model, args), daemon=True
     )
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port), make_handler(state, args.cat_only)
+    )
+    server.daemon_threads = True
     capture.start()
     infer.start()
-
-    # Localhost-only: access over SSH tunnel, not exposed on network.
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
-    server.daemon_threads = True
-    print("[LIVE] http://127.0.0.1:%d" % args.port, flush=True)
-    print("[INFO] Dari laptop: ssh -N -L %d:127.0.0.1:%d yolo@yolo11.local" %
+    print("[LIVE] http://127.0.0.1:%d/" % args.port, flush=True)
+    print("[INFO] SSH tunnel dari laptop: ssh -N -L %d:127.0.0.1:%d yolo@yolo11.local" %
           (args.port, args.port), flush=True)
-    print("[INFO] Ctrl+C untuk berhenti. Servo tidak digunakan.", flush=True)
+    print("[MODEL] Hanya YOLO11 detection. Stop dengan Ctrl+C.", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
-        print("\n[STOP] Live camera berhenti", flush=True)
+        print("\n[STOP] Live YOLO11 dimatikan", flush=True)
     finally:
         state.stop.set()
-        with state.condition:
-            state.condition.notify_all()
+        with state.lock:
+            state.lock.notify_all()
         server.server_close()
         capture.join(timeout=2)
 
