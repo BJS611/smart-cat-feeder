@@ -125,6 +125,7 @@ def encoder_worker(state, cv2, args):
                     else ()
                 )
 
+            started_at = time.monotonic()
             begin = time.perf_counter()
             annotated = frame.copy()
             if boxes:
@@ -144,7 +145,7 @@ def encoder_worker(state, cv2, args):
                     state.encode_ms = round((time.perf_counter() - begin) * 1000, 1)
                     state.seq += 1
                     state.lock.notify_all()
-            next_due = max(begin + period, finished_at)
+            next_due = max(started_at + period, finished_at)
     except Exception as exc:
         state.error = "JPEG encode error: %s" % exc
         print("[ERROR]", state.error, flush=True)
@@ -174,6 +175,7 @@ def inference_worker(state, model, args, cat_gate=None):
             frame = state.raw.copy()
             last_seq = state.raw_seq
 
+        started_at = time.monotonic()
         begin = time.perf_counter()
         try:
             boxes = predict_boxes(
@@ -199,7 +201,7 @@ def inference_worker(state, model, args, cat_gate=None):
             with state.lock:
                 state.lock.notify_all()
             return
-        next_due = max(begin + args.interval, time.monotonic())
+        next_due = max(started_at + args.interval, time.monotonic())
 
 
 PAGE = """<!doctype html><html lang="id"><head>
@@ -241,12 +243,33 @@ def make_handler(state, cat_only):
                         {"class": b[5], "confidence": round(b[6], 3)}
                         for b in state.boxes
                     ]
+                    now = time.monotonic()
                     data = {
                         "model": "models/yolo11.pt",
                         "mode": "cat-only" if cat_only else "all-classes",
                         "camera_frames": state.frame_count,
+                        "encoded_frames": state.encoded_frames,
                         "inferences": state.inferences,
                         "detection_ms": state.det_ms,
+                        "performance": {
+                            "camera_fps": recent_fps(state.capture_times, now, state.started_at),
+                            "stream_fps": recent_fps(state.encode_times, now, state.started_at),
+                            "yolo_fps": recent_fps(state.infer_times, now, state.started_at),
+                            "jpeg_encode_ms": state.encode_ms,
+                            "jpeg_kb": round(state.jpeg_bytes / 1024, 1),
+                            "camera_frame_age_ms": (
+                                round((now - state.raw_time) * 1000, 1)
+                                if state.raw_time is not None else None
+                            ),
+                            "jpeg_frame_age_ms": (
+                                round((now - state.jpeg_time) * 1000, 1)
+                                if state.jpeg_time is not None else None
+                            ),
+                            "boxes_age_ms": (
+                                round((now - state.boxes_time) * 1000, 1)
+                                if state.boxes_time is not None else None
+                            ),
+                        },
                         "detections": detections,
                         "error": state.error,
                         "age_classifier_loaded": False,
@@ -261,6 +284,13 @@ def make_handler(state, cat_only):
                 self.end_headers()
                 self.wfile.write(payload)
             elif path == "/stream.mjpg":
+                # Don't accumulate seconds of outdated JPEGs in TCP send queues.
+                try:
+                    self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
+                    self.connection.settimeout(3.0)
+                except OSError:
+                    pass
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                 self.send_header("Cache-Control", "no-store")
@@ -291,7 +321,10 @@ def make_handler(state, cat_only):
                 self.send_error(404)
 
         def log_message(self, fmt, *values):
-            if self.path.split("?", 1)[0] not in ("/status", "/stream.mjpg"):
+            path = self.path.split("?", 1)[0]
+            # These repeated foreign browser requests are outside this app.
+            # Still return HTTP 404 but avoid filling the Pi terminal with logs.
+            if path not in ("/status", "/stream.mjpg") and not path.startswith("/hybridaction/"):
                 super().log_message(fmt, *values)
 
     return Handler
@@ -303,7 +336,18 @@ def main():
     parser.add_argument("--port", type=int, default=8767)
     parser.add_argument("--imgsz", type=int, default=320)
     parser.add_argument("--conf", type=float, default=0.4)
-    parser.add_argument("--interval", type=float, default=0.4)
+    parser.add_argument("--interval", type=float, default=0.4,
+                        help="Seconds between YOLO runs (0.4 = max 2.5 infer/s)")
+    parser.add_argument("--camera-fps", type=int, default=30,
+                        help="Requested camera FPS; actual V4L2 mode is logged")
+    parser.add_argument("--camera-fourcc", choices=("MJPG", "YUYV", "AUTO"), default="MJPG",
+                        help="Requested USB camera pixel format (default MJPG)")
+    parser.add_argument("--stream-fps", type=float, default=15.0,
+                        help="Target MJPEG encoding FPS independent of YOLO (default 15)")
+    parser.add_argument("--jpeg-quality", type=int, default=65,
+                        help="JPEG quality 30..95; smaller uses less CPU/bandwidth")
+    parser.add_argument("--box-ttl", type=float, default=1.0,
+                        help="Hide bounding boxes when their YOLO result is too old")
     parser.add_argument("--arduino-port", default=None,
                         help="Aktifkan pengiriman FEED ke Arduino Uno melalui USB serial, contoh /dev/ttyACM0")
     parser.add_argument("--stable-hits", type=int, default=3,
@@ -319,6 +363,10 @@ def main():
     args = parser.parse_args()
     if not (1 <= args.port <= 65535 and 0 < args.conf < 1
             and args.imgsz >= 32 and args.interval >= 0
+            and 1 <= args.camera_fps <= 60
+            and 1 <= args.stream_fps <= 60
+            and 30 <= args.jpeg_quality <= 95
+            and args.box_ttl >= 0.2
             and args.stable_hits >= 2 and args.rearm_seconds >= 1
             and args.cooldown_seconds >= (5 if args.bench_test else 30)
             and (not args.bench_test or bool(args.arduino_port))):
@@ -326,8 +374,22 @@ def main():
 
     import cv2
     model = load_detector()
-    cap = open_camera(cv2, args.source)
-    print("[CAMERA OK] %s" % args.source, flush=True)
+    cap = open_camera(
+        cv2, args.source, fps=args.camera_fps,
+        fourcc=args.camera_fourcc,
+    )
+    actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc_str = "".join(chr((actual_fourcc >> (8 * i)) & 255)
+                         if 32 <= ((actual_fourcc >> (8 * i)) & 255) <= 126 else "?"
+                         for i in range(4))
+    print(
+        "[CAMERA OK] %s | %.0fx%.0f | %.1f fps requested=%d | FOURCC=%s requested=%s" %
+        (args.source, cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+         cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+         cap.get(cv2.CAP_PROP_FPS), args.camera_fps,
+         fourcc_str, args.camera_fourcc),
+        flush=True,
+    )
     state = State()
     bridge = None
     gate = None
@@ -344,7 +406,10 @@ def main():
     else:
         print("[SAFE] Arduino tidak aktif. Untuk mengirim FEED, tentukan --arduino-port.", flush=True)
     capture = threading.Thread(
-        target=camera_worker, args=(state, cap, cv2), daemon=True
+        target=camera_worker, args=(state, cap), daemon=True
+    )
+    encoder = threading.Thread(
+        target=encoder_worker, args=(state, cv2, args), daemon=True
     )
     infer = threading.Thread(
         target=inference_worker, args=(state, model, args, gate), daemon=True
@@ -354,8 +419,13 @@ def main():
     )
     server.daemon_threads = True
     capture.start()
+    encoder.start()
     infer.start()
     print("[LIVE] http://127.0.0.1:%d/" % args.port, flush=True)
+    print(
+        "[STREAM] target %.1f fps | quality=%d | YOLO interval=%.2f s | no frame queue" %
+        (args.stream_fps, args.jpeg_quality, args.interval), flush=True
+    )
     print("[INFO] SSH tunnel dari laptop: ssh -N -L %d:127.0.0.1:%d yolo@yolo11.local" %
           (args.port, args.port), flush=True)
     print("[MODEL] YOLO11 detect saja; Arduino %s. Stop dengan Ctrl+C." %
@@ -370,6 +440,8 @@ def main():
             state.lock.notify_all()
         server.server_close()
         capture.join(timeout=2)
+        encoder.join(timeout=2)
+        infer.join(timeout=2)
         if bridge is not None:
             bridge.close()
 
