@@ -85,10 +85,16 @@ class CatGate:
     Arduino separately enforces its own cooldown.
     """
 
-    def __init__(self, bridge, stable_hits=3, absence_seconds=5.0, cooldown_seconds=60.0):
-        if stable_hits < 2 or absence_seconds < 1 or cooldown_seconds < 30:
-            raise ValueError("Minimum safety limits: hits>=2, absence>=1s, cooldown>=30s")
+    def __init__(self, bridge, stable_hits=3, absence_seconds=5.0,
+                 cooldown_seconds=60.0, bench_test=False):
+        if stable_hits < 2 or absence_seconds < 1:
+            raise ValueError("Minimum safety limits: hits>=2 and absence>=1s")
+        if cooldown_seconds < 5:
+            raise ValueError("Cooldown minimum 5 seconds in bench test")
+        if cooldown_seconds < 30 and not bench_test:
+            raise ValueError("Cooldown <30 s hanya untuk mode --bench-test tanpa makanan")
         self.bridge = bridge
+        self.bench_test = bench_test
         self.stable_hits = stable_hits
         self.absence_seconds = absence_seconds
         self.cooldown_seconds = cooldown_seconds
@@ -133,6 +139,7 @@ class CatGate:
     def snapshot(self):
         return {
             "enabled": True,
+            "bench_test": self.bench_test,
             "armed": self.armed,
             "cat_detection_streak": self.hit_streak,
             "commands_accepted": self.commands_accepted,
