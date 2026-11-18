@@ -205,14 +205,17 @@ def main():
     parser.add_argument("--rearm-seconds", type=float, default=5.0,
                         help="Wajib tidak ada cat selama N detik sebelum bisa trigger lagi")
     parser.add_argument("--cooldown-seconds", type=float, default=60.0,
-                        help="Minimum detik antar perintah (Arduino juga punya cooldown sendiri)")
+                        help="Minimum detik antar perintah (normal 60, bench minimal 5)")
+    parser.add_argument("--bench-test", action="store_true",
+                        help="Wajib untuk cooldown <30 detik; uji servo tanpa hopper/makanan saja")
     parser.add_argument("--cat-only", action="store_true",
                         help="Only show COCO class 'cat' (15); default all 80 classes")
     args = parser.parse_args()
     if not (1 <= args.port <= 65535 and 0 < args.conf < 1
             and args.imgsz >= 32 and args.interval >= 0
             and args.stable_hits >= 2 and args.rearm_seconds >= 1
-            and args.cooldown_seconds >= 30):
+            and args.cooldown_seconds >= (5 if args.bench_test else 30)
+            and (not args.bench_test or bool(args.arduino_port))):
         parser.error("Port, confidence, resolusi, atau interval tidak valid")
 
     import cv2
@@ -223,11 +226,14 @@ def main():
     bridge = None
     gate = None
     if args.arduino_port:
-        print("[SAFETY] MODE SERVO BENCH TEST: jangan pasang hopper atau makanan sebelum ada timbangan.", flush=True)
+        print("[SAFETY] SERVO TEST: tanpa hopper/makanan; tidak ada kontrol porsi.", flush=True)
+        if args.bench_test:
+            print("[WARNING] BENCH TEST ONLY: cooldown pendek %.1f detik, tidak untuk dispenser!" % args.cooldown_seconds, flush=True)
         bridge = ArduinoBridge(args.arduino_port)
         gate = CatGate(bridge, stable_hits=args.stable_hits,
                        absence_seconds=args.rearm_seconds,
-                       cooldown_seconds=args.cooldown_seconds)
+                       cooldown_seconds=args.cooldown_seconds,
+                       bench_test=args.bench_test)
         state.serial_info = gate.snapshot()
     else:
         print("[SAFE] Arduino tidak aktif. Untuk mengirim FEED, tentukan --arduino-port.", flush=True)
