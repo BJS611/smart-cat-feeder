@@ -296,6 +296,8 @@ git pull --ff-only
 
 Jika kamu tidak memakai firmware bench 5 detik, compile/upload folder `arduino/smart_cat_feeder_servo` (cooldown 60 detik) sebagai gantinya.
 
+**Jika koneksi serial menunjukkan startup Arduino tetapi gagal pada `PING`:** model Uno dengan CH340 bisa reset otomatis ketika port serial dibuka, dan LCD I2C dapat menambah durasi startup. `cat_servo_bridge.py` terbaru mencoba ulang `PING` selama sekitar 12 detik sebelum menyatakan gagal. Jalankan `git pull --ff-only` lalu ulangi `serial_servo_test.py`. Jika `PING` berhasil tetapi `EMERGENCY` tidak dikenali, kemungkinan Arduino masih menjalankan sketch lama; upload firmware LCD terbaru.
+
 **Tes LCD tanpa menggerakkan servo:**
 
 ```bash
