@@ -102,6 +102,26 @@ class ArduinoBridge:
         )
         return reply == "ACK FEED", reply
 
+    def cooldown_status(self, timeout=2.0):
+        """Read remaining automatic cooldown seconds from Arduino, no servo motion."""
+        self._write("COOLDOWN_STATUS\n")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.serial.readline().decode("ascii", errors="replace").strip()
+            if not line:
+                continue
+            if line.startswith("COOLDOWN "):
+                try:
+                    return int(line.split()[1])
+                except (ValueError, IndexError):
+                    raise RuntimeError("Balasan COOLDOWN tidak valid: %r" % line)
+            print("[ARDUINO]", line, flush=True)
+            if line == "ERR UNKNOWN_COMMAND":
+                raise RuntimeError(
+                    "Firmware belum mendukung COOLDOWN_STATUS. Upload sketch Arduino terbaru."
+                )
+        raise RuntimeError("Arduino tidak membalas COOLDOWN_STATUS; cek firmware/port.")
+
     def food_status(self, timeout=2.0):
         """Read IR sensor and confirmed food state; never commands servo movement."""
         self._write("FOOD_STATUS\n")
