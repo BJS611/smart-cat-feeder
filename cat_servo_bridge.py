@@ -102,6 +102,27 @@ class ArduinoBridge:
         )
         return reply == "ACK FEED", reply
 
+    def scan_i2c(self, timeout=8.0):
+        """Scan Arduino Uno I2C bus (A4/A5). Does not actuate the servo."""
+        self.serial.reset_input_buffer()
+        self._write("I2C_SCAN\n")
+        found = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.serial.readline().decode("ascii", errors="replace").strip()
+            if not line:
+                continue
+            print("[ARDUINO]", line, flush=True)
+            if line.startswith("I2C_FOUND 0x"):
+                found.append(line.split()[-1])
+            elif line.startswith("I2C_SCAN_DONE "):
+                return found
+            elif line == "ERR UNKNOWN_COMMAND":
+                raise RuntimeError(
+                    "Sketch Arduino belum memiliki perintah I2C_SCAN. Upload firmware terbaru."
+                )
+        raise RuntimeError("I2C scan tidak selesai; cek kabel SDA/SCL dan suplai LCD.")
+
     def close(self):
         if self.serial and self.serial.is_open:
             self.serial.close()
