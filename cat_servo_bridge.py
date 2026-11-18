@@ -58,10 +58,21 @@ class ArduinoBridge:
     def status(self):
         self._write("STATUS\n")
         reply = self._wait_for(
-            ("STATUS IDLE", "STATUS OPENING", "STATUS CLOSING"),
+            ("STATUS IDLE", "STATUS OPENING", "STATUS CLOSING", "STATUS EMERGENCY"),
             timeout=2.0,
         )
         return reply
+
+    def emergency(self):
+        """Display Emergency on LCD and inhibit automatic FEED until RESET.
+        This is a software-only demo, NOT a physical emergency stop.
+        """
+        self._write("EMERGENCY\n")
+        return self._wait_for(("ACK EMERGENCY",), timeout=2.0) == "ACK EMERGENCY"
+
+    def reset_emergency(self):
+        self._write("RESET\n")
+        return self._wait_for(("ACK RESET",), timeout=2.0) == "ACK RESET"
 
     def feed_once(self):
         """Return True only if the Arduino acknowledged the command.
@@ -69,7 +80,7 @@ class ArduinoBridge:
         """
         self._write("FEED\n")
         reply = self._wait_for(
-            ("ACK FEED", "ERR BUSY", "ERR COOLDOWN", "ERR UNKNOWN_COMMAND"),
+            ("ACK FEED", "ERR BUSY", "ERR COOLDOWN", "ERR EMERGENCY", "ERR UNKNOWN_COMMAND"),
             timeout=2.0,
         )
         return reply == "ACK FEED", reply
