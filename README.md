@@ -136,6 +136,33 @@ cat results/summary.json
 
 **Kriteria lulus:** kedua model dapat dimuat, kamera dapat menangkap frame, hasil inferensi tercatat, dan saat ada kucing nyata akan muncul `[CAT]`. Nilai FPS diambil dari Raspberry Pi yang sebenarnya; jangan berasumsi memiliki FPS tertentu sebelum diukur.
 
+## Live video lewat browser (SSH/headless)
+
+Setelah selftest dan webcam berfungsi, tampilkan video langsung dengan bounding box kucing serta perkiraan usia lewat browser laptop. Server hanya mendengarkan di `127.0.0.1` pada Raspberry Pi agar tidak terbuka langsung ke jaringan.
+
+Di Raspberry Pi (`yolo@yolo11`):
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+v4l2-ctl --list-devices
+.venv/bin/python live_cam.py --source 0 --port 8767 --imgsz 320
+```
+
+Jangan tutup terminal Raspberry Pi. Jika webcam bukan indeks 0, gunakan indeks yang sesuai, misalnya `--source 2`.
+
+Di terminal **kedua pada laptop Parrot OS** (jangan dijalankan di shell SSH Pi):
+
+```bash
+ssh -N -L 8767:127.0.0.1:8767 yolo@yolo11.local
+```
+
+Kemudian buka **http://127.0.0.1:8767/** pada browser laptop. Di halaman tersebut tersedia video MJPEG dan status deteksi yang diperbarui. Tekan Ctrl+C di terminal server/tunnel untuk berhenti. Tidak ada kontrol servo atau pemberian makan dalam mode ini.
+
+Jika muncul `Connection refused`, pastikan proses `live_cam.py` masih berjalan dan tunnel SSH terbuka; coba di Raspberry Pi `curl -I http://127.0.0.1:8767/`. Jika kamera dipakai proses lain, hentikan pengujian `pi5_ai_test.py` sebelum memulai live cam.
+
+---
+
 ## 8. Troubleshooting cepat
 
 | Gejala | Tindakan |
