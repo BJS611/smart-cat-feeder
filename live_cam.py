@@ -183,16 +183,17 @@ def inference_worker(state, model, args, cat_gate=None):
                 conf=args.conf, cat_only=args.cat_only,
             )
             dt_ms = (time.perf_counter() - begin) * 1000.0
-            if cat_gate is not None:
-                cat_gate.observe(any(b[4] == 15 for b in boxes))
             now = time.monotonic()
+            # Publish detections before a potentially slow Arduino serial ACK.
             with state.lock:
                 state.boxes = boxes
                 state.boxes_time = now
                 state.inferences += 1
                 state.infer_times.append(now)
                 state.det_ms = round(dt_ms, 1)
-                if cat_gate is not None:
+            if cat_gate is not None:
+                cat_gate.observe(any(b[4] == 15 for b in boxes))
+                with state.lock:
                     state.serial_info = cat_gate.snapshot()
         except Exception as exc:
             state.error = "Inference error: %s" % exc
