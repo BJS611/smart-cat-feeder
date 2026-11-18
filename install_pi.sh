@@ -20,7 +20,7 @@ echo "[1/3] Memasang PyTorch + TorchVision CPU-only untuk Linux ARM64..."
   'torch==2.11.0+cpu' 'torchvision==0.26.0+cpu'
 
 echo "[2/3] Memasang Ultralytics dan OpenCV..."
-.venv/bin/python -m pip install --no-cache-dir ultralytics
+.venv/bin/python -m pip install --no-cache-dir ultralytics pyserial
 
 echo "[3/3] Memverifikasi dependensi..."
 .venv/bin/python - <<'PY'
