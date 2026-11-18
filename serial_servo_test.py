@@ -31,12 +31,31 @@ def main():
         "--food-monitor", action="store_true",
         help="Monitor raw infrared sensor and confirmed food state (no servo movement)"
     )
+    actions.add_argument(
+        "--cooldown-monitor", action="store_true",
+        help="Monitor TM1637 automatic cooldown countdown while pressing D2, no FEED sent"
+    )
     args = parser.parse_args()
     bridge = ArduinoBridge(args.port)
     try:
         print("[PING]", "OK" if bridge.ping() else "FAILED", flush=True)
         print("[STATUS]", bridge.status(), flush=True)
-        if args.food_monitor:
+        if args.cooldown_monitor:
+            print("[TM1637] Tekan tombol D2 untuk siklus servo manual (bench tanpa pakan).", flush=True)
+            print("[TM1637] Countdown ditampilkan oleh Arduino. Ctrl+C untuk berhenti.", flush=True)
+            try:
+                last_seconds = None
+                while True:
+                    seconds = bridge.cooldown_status()
+                    if seconds != last_seconds:
+                        mm, ss = divmod(seconds, 60)
+                        print("[COOLDOWN] %02d:%02d (%d detik)" %
+                              (mm, ss, seconds), flush=True)
+                        last_seconds = seconds
+                    time.sleep(0.2)
+            except KeyboardInterrupt:
+                print("\n[TM1637] Monitor selesai.", flush=True)
+        elif args.food_monitor:
             print("[IR] Pantau sensor D6. Tutupi/hilangkan pakan di depan sensor.", flush=True)
             print("[IR] Ctrl+C untuk berhenti. Tidak ada perintah FEED.", flush=True)
             try:
