@@ -223,6 +223,37 @@ ssh -N -L 8767:127.0.0.1:8767 yolo@yolo11.local
 
 Buka **http://127.0.0.1:8767/** untuk melihat video dengan bounding box kucing dan status pengiriman perintah Arduino (balasan `ACK FEED` bukan bukti fisik bahwa servo benar-benar bergerak). Gunakan `Ctrl+C` pada terminal Pi untuk berhenti.
 
+### Uji cooldown 5 detik (khusus servo tanpa hopper/makanan)
+
+**Perbedaan istilah:** `--rearm-seconds 5` berarti kucing harus **tidak terlihat selama 5 detik** sebelum sistem siap kembali. Itu bukan cooldown. Cooldown default sebelumnya `60 detik` diberlakukan di **Raspberry Pi dan Arduino**, sehingga hanya mengubah argumen Python menjadi `5` tidak akan bekerja dengan sketch normal.
+
+Untuk **menguji gerakan mekanik tanpa pakan** dengan cooldown 5 detik, gunakan sketch terpisah `arduino/smart_cat_feeder_servo_bench_5s/smart_cat_feeder_servo_bench_5s.ino`. **Jangan gunakan sketch ini saat hopper berisi pakan.** Sudut servo, durasi buka, dan protokol serial tetap sama; cooldown Arduino berubah menjadi 5000ms.
+
+**Upload ke Arduino dari Raspberry Pi** (pastikan mode live dan Serial Monitor sudah ditutup):
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+Jalankan YOLO11 + USB serial dengan mode uji 5 detik:
+
+```bash
+.venv/bin/python live_cam.py \
+  --source 0 --port 8767 --imgsz 320 --conf 0.40 \
+  --cat-only --arduino-port /dev/ttyUSB0 \
+  --stable-hits 3 --rearm-seconds 5 \
+  --cooldown-seconds 5 --bench-test
+```
+
+Prosesnya adalah **3 hasil inferensi kucing berturut-turut** → satu gerakan servo → tidak ada deteksi kucing selama **5 detik** agar sistem siap lagi → minimal **5 detik** sejak trigger sebelumnya. Jika kucing tetap di depan kamera, servo tidak bergerak lagi meskipun 5 detik sudah lewat.
+
+Untuk kembali ke default yang lebih aman, upload ulang sketch normal dari folder `arduino/smart_cat_feeder_servo` dan **hilangkan** `--bench-test`, gunakan `--cooldown-seconds 60`. Tanpa HX711, kontrol porsi, dan mekanisme pengunci, jangan gunakan deteksi otomatis sebagai pengumpan makanan tanpa pengawasan.
+
 ### Jika terjadi masalah
 
 | Masalah | Pemeriksaan |
