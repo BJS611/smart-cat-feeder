@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Browser live camera: ONE YOLO11 object detector only.
-No age model, no previous detector checkpoint, no GPIO / servo operation.
+No age model. Optional USB serial Arduino Uno servo bench test.
 Access localhost:8767 via SSH tunnel from your laptop.
 """
 import argparse
@@ -10,6 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from yolo11_runtime import draw_boxes, load_detector, open_camera, predict_boxes
+from cat_servo_bridge import ArduinoBridge, CatGate
 
 
 class State:
@@ -24,6 +25,7 @@ class State:
         self.inferences = 0
         self.det_ms = None
         self.error = None
+        self.serial_info = {"enabled": False, "reason": "Arduino belum diaktifkan"}
 
 
 def camera_worker(state, cap, cv2):
@@ -62,7 +64,7 @@ def camera_worker(state, cap, cv2):
         cap.release()
 
 
-def inference_worker(state, model, args):
+def inference_worker(state, model, args, cat_gate=None):
     while not state.stop.is_set():
         with state.lock:
             frame = None if state.raw is None else state.raw.copy()
@@ -76,10 +78,14 @@ def inference_worker(state, model, args):
                 conf=args.conf, cat_only=args.cat_only
             )
             dt_ms = (time.perf_counter() - begin) * 1000.0
+            if cat_gate is not None:
+                cat_gate.observe(any(b[4] == 15 for b in boxes))
             with state.lock:
                 state.boxes = boxes
                 state.inferences += 1
                 state.det_ms = round(dt_ms, 1)
+                if cat_gate is not None:
+                    state.serial_info = cat_gate.snapshot()
         except Exception as exc:
             state.error = "Inference error: %s" % exc
             print("[ERROR]", state.error, flush=True)
@@ -100,7 +106,7 @@ pre{white-space:pre-wrap;background:#1e293b;border-radius:10px;padding:12px}
 small{color:#cbd5e1}
 </style></head><body>
 <h2>YOLO11 · Live Object Detection</h2>
-<p><small>Hanya satu model YOLO11; tidak ada klasifikasi usia dan kontrol servo.</small></p>
+<p><small>Satu model YOLO11. Arduino/servo hanya aktif bila argumen --arduino-port diberikan. Belum memakai timbangan pakan.</small></p>
 <img src="/stream.mjpg" alt="Webcam live YOLO11">
 <h3>Status</h3><pre id="status">Menghubungkan...</pre>
 <script>
@@ -138,7 +144,8 @@ def make_handler(state, cat_only):
                         "detections": detections,
                         "error": state.error,
                         "age_classifier_loaded": False,
-                        "servo_activated": False,
+                        "arduino_serial": dict(state.serial_info),
+                        "physical_servo_motion_verified": False,
                     }
                 payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
@@ -191,11 +198,21 @@ def main():
     parser.add_argument("--imgsz", type=int, default=320)
     parser.add_argument("--conf", type=float, default=0.4)
     parser.add_argument("--interval", type=float, default=0.4)
+    parser.add_argument("--arduino-port", default=None,
+                        help="Aktifkan pengiriman FEED ke Arduino Uno melalui USB serial, contoh /dev/ttyACM0")
+    parser.add_argument("--stable-hits", type=int, default=3,
+                        help="Deteksi cat berturut-turut sebelum FEED (default 3)")
+    parser.add_argument("--rearm-seconds", type=float, default=5.0,
+                        help="Wajib tidak ada cat selama N detik sebelum bisa trigger lagi")
+    parser.add_argument("--cooldown-seconds", type=float, default=60.0,
+                        help="Minimum detik antar perintah (Arduino juga punya cooldown sendiri)")
     parser.add_argument("--cat-only", action="store_true",
                         help="Only show COCO class 'cat' (15); default all 80 classes")
     args = parser.parse_args()
     if not (1 <= args.port <= 65535 and 0 < args.conf < 1
-            and args.imgsz >= 32 and args.interval >= 0):
+            and args.imgsz >= 32 and args.interval >= 0
+            and args.stable_hits >= 2 and args.rearm_seconds >= 1
+            and args.cooldown_seconds >= 30):
         parser.error("Port, confidence, resolusi, atau interval tidak valid")
 
     import cv2
@@ -203,11 +220,22 @@ def main():
     cap = open_camera(cv2, args.source)
     print("[CAMERA OK] %s" % args.source, flush=True)
     state = State()
+    bridge = None
+    gate = None
+    if args.arduino_port:
+        print("[SAFETY] MODE SERVO BENCH TEST: jangan pasang hopper atau makanan sebelum ada timbangan.", flush=True)
+        bridge = ArduinoBridge(args.arduino_port)
+        gate = CatGate(bridge, stable_hits=args.stable_hits,
+                       absence_seconds=args.rearm_seconds,
+                       cooldown_seconds=args.cooldown_seconds)
+        state.serial_info = gate.snapshot()
+    else:
+        print("[SAFE] Arduino tidak aktif. Untuk mengirim FEED, tentukan --arduino-port.", flush=True)
     capture = threading.Thread(
         target=camera_worker, args=(state, cap, cv2), daemon=True
     )
     infer = threading.Thread(
-        target=inference_worker, args=(state, model, args), daemon=True
+        target=inference_worker, args=(state, model, args, gate), daemon=True
     )
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(state, args.cat_only)
@@ -218,7 +246,8 @@ def main():
     print("[LIVE] http://127.0.0.1:%d/" % args.port, flush=True)
     print("[INFO] SSH tunnel dari laptop: ssh -N -L %d:127.0.0.1:%d yolo@yolo11.local" %
           (args.port, args.port), flush=True)
-    print("[MODEL] Hanya YOLO11 detection. Stop dengan Ctrl+C.", flush=True)
+    print("[MODEL] YOLO11 detect saja; Arduino %s. Stop dengan Ctrl+C." %
+          ("AKTIF" if bridge else "OFF"), flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
@@ -229,6 +258,8 @@ def main():
             state.lock.notify_all()
         server.server_close()
         capture.join(timeout=2)
+        if bridge is not None:
+            bridge.close()
 
 
 if __name__ == "__main__":
