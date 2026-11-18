@@ -115,6 +115,67 @@ Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka 
 
 **Uji pertama tanpa memasang lengan servo ke mekanisme dispenser, dan tanpa makanan.** Program ini belum memakai HX711/load cell; gerakan servo tidak menjamin gram pakan tertentu. Jangan gunakan sebagai feeder otomatis tanpa batasan mekanis, porsi dan pengujian keselamatan.
 
+### Sensor infrared digital (D6) dan LED merah peringatan pakan habis (D7)
+
+**Asumsi modul:** sensor IR proximity/obstacle detection 3-pin atau 4-pin (seperti FC-51/LM393) dengan keluaran **digital OUT/DO**. Jenis IR break-beam atau modul analog murni memerlukan penyesuaian; jangan menebak pin. Modul reflektif mendeteksi objek pada satu titik, **tidak mengukur berat, volume, atau total pakan**. Sensor harus diuji terhadap warna, tekstur, jarak, sudut, cahaya, dan material dinding hopper sebelum digunakan.
+
+**Koneksi (matikan daya sebelum memindahkan kabel):**
+
+| Perangkat | Pin Arduino Uno |
+| --- | --- |
+| Sensor IR VCC | 5V |
+| Sensor IR GND | GND |
+| Sensor IR DO / OUT (digital) | D6 |
+| LED merah anoda (+) | D7 **lewat resistor seri 220–330 Ω** |
+| LED merah katoda (-) | GND |
+
+Pin lainnya tetap: tombol manual D2-GND, LED hijau D4, LED kuning D5, sinyal servo D9, LCD I2C SDA=A4 SCL=A5. Daya MG996R **eksternal 5–6V**, ground disatukan dengan Arduino. Jika menggunakan lampu indikator bertegangan 12/24V atau LED berarus tinggi, wajib driver yang sesuai; jangan langsung ke pin digital Arduino.
+
+**Logika indikator baru:**
+
+| Kondisi | Hijau D4 | Kuning D5 | Merah D7 |
+| --- | --- | --- | --- |
+| Pakan terdeteksi dan servo Idle | ON | OFF | OFF |
+| Servo bergerak lewat YOLO11 / tombol manual; pakan tersedia | OFF | ON | OFF |
+| Objek/pakan tidak terdeteksi stabil selama 3 detik | OFF saat Idle | Sesuai servo/emergency | ON |
+| Status sensor belum terverifikasi sesaat setelah boot | OFF | Sesuai servo/emergency | ON (peringatan) |
+| Pakan kembali terdeteksi stabil 0,8 detik | ON jika Idle | Sesuai servo/emergency | OFF |
+
+Peringatan merah **tidak memblokir** FEED otomatis atau tombol manual saat ini; sensor hanya monitoring/indikator agar perilaku servo existing tidak diam-diam berubah. Untuk feeding nyata, pertimbangkan safety interlock berbasis sensor level yang tervalidasi serta timbangan/pembatas porsi.
+
+Pada kebanyakan sensor reflektif digital **LOW = objek terdeteksi** dan **HIGH = tak ada objek**. Jika modul kamu terbalik, ubah `IR_FOOD_PRESENT_LEVEL` dari `LOW` menjadi `HIGH` di sketch sebelum compile. Sensor dipasang pada titik **minimum level pakan**, dengan pemancar/penerima IR menghadap langsung ke permukaan pellet, bukan dinding kosong atau cahaya kuat. Kalibrasikan potensiometer di modul sambil mengamati hasil serial.
+
+**Meng-upload firmware bench terbaru:**
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+
+# Hentikan live_cam.py dan serial monitor lain sebelum meng-upload.
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+**Uji sensor tanpa menggerakkan servo** (membuka satu sesi serial dan memantau terus-menerus):
+
+```bash
+.venv/bin/python serial_servo_test.py --port /dev/ttyUSB0 --food-monitor
+```
+
+Contoh hasil:
+
+```text
+[IR] FOOD_STATUS RAW=LOW STATE=PRESENT
+[IR] FOOD_STATUS RAW=HIGH STATE=CHECKING
+[IR] FOOD_STATUS RAW=HIGH STATE=EMPTY
+```
+
+Saat startup, `STATE=CHECKING` selama proses validasi pembacaan. Setelah 3 detik tanpa objek, `STATE=EMPTY` dan LED merah ON. Setelah pakan berada di depan sensor stabil 0,8 detik, `STATE=PRESENT` dan LED merah OFF (LED hijau kembali menyala jika tidak sedang Feeding).
+
+**Catatan:** pada modul tanpa sensor tersambung, input D6 memakai `INPUT_PULLUP` dan cenderung terbaca HIGH, sehingga LED merah juga akan menyala setelah start. Kondisi ini **tidak** membedakan hopper kosong dengan sensor yang hilang atau kabel putus. Periksa kabel dan sensor secara terpisah; jangan mengandalkan satu sensor reflektif sebagai proteksi keselamatan atau pengukuran porsi yang presisi.
+
 ### Dua LED indikator Arduino Uno (hijau / kuning)
 
 Firmware terbaru pada **kedua** sketch (normal 60 s dan bench 5 s) menyediakan LED indikator:
