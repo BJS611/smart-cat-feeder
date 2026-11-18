@@ -298,6 +298,29 @@ Jika kamu tidak memakai firmware bench 5 detik, compile/upload folder `arduino/s
 
 **Jika koneksi serial menunjukkan startup Arduino tetapi gagal pada `PING`:** model Uno dengan CH340 bisa reset otomatis ketika port serial dibuka, dan LCD I2C dapat menambah durasi startup. `cat_servo_bridge.py` terbaru mencoba ulang `PING` selama sekitar 12 detik sebelum menyatakan gagal. Jalankan `git pull --ff-only` lalu ulangi `serial_servo_test.py`. Jika `PING` berhasil tetapi `EMERGENCY` tidak dikenali, kemungkinan Arduino masih menjalankan sketch lama; upload firmware LCD terbaru.
 
+**Jika LCD menunjukkan kotak-kotak hitam padahal Arduino sudah membalas `ACK EMERGENCY`/`ACK RESET`:**
+
+1. Matikan daya sebelum memindahkan kabel. Periksa LCD `GND -> GND`, `VCC -> 5V`, `SDA -> A4`, `SCL -> A5` pada **Arduino Uno**, bukan pada Pi.
+2. Putar perlahan potensiometer kontras kecil pada backpack LCD. Kotak hitam sering terjadi saat kontras terlalu tinggi atau LCD belum terinisialisasi.
+3. Periksa alamat I2C lewat perintah serial baru. Ini memerlukan upload firmware Arduino terbaru **sekali** (bukan flash Raspberry Pi).
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+
+# Tutup live_cam.py dan semua aplikasi yang memakai port /dev/ttyUSB0 terlebih dahulu.
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+
+.venv/bin/python serial_servo_test.py --port /dev/ttyUSB0 --i2c-scan
+```
+
+Contoh hasil: `I2C_FOUND 0x27` atau `I2C_FOUND 0x3F`. Bila `0x27` ditemukan, kode awal LCD sudah benar dan fokus berikutnya adalah kontras/kabel/susunan pin backpack/library. Bila `0x3F` ditemukan, ubah alamat di sketch dari `0x27` ke `0x3F`, compile, lalu upload kembali. Jika `I2C_SCAN_DONE 0`, Arduino tidak memperoleh respons dari modul apa pun: fokus pada SDA/SCL, VCC/GND, sambungan/solder backpack, atau modul I2C rusak.
+
+**Jangan** jalankan `i2cdetect` pada Raspberry Pi untuk perangkat ini: LCD tersambung ke bus I2C **Arduino**, bukan Pi.
+
 **Tes LCD tanpa menggerakkan servo:**
 
 ```bash
