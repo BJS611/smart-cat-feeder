@@ -1,6 +1,7 @@
 #include <Servo.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <TM1637Display.h>
 
 // BENCH TEST ONLY - Arduino Uno MG996R, cooldown 5 seconds.
 // DO NOT connect to a hopper or use this version to dispense food.
@@ -11,6 +12,8 @@
 // Does not dispense controlled portions; bench-test without the hopper attached.
 
 const uint8_t SERVO_PIN = 9;
+const uint8_t TM1637_CLK_PIN = 10; // 4-digit cooldown display CLK
+const uint8_t TM1637_DIO_PIN = 11; // 4-digit cooldown display DIO
 const uint8_t LED_GREEN_PIN = 4;    // Green: Idle (normal, not moving)
 const uint8_t LED_YELLOW_PIN = 5;   // Yellow: Feeding or manual Emergency
 const uint8_t IR_SENSOR_PIN = 6;    // IR obstacle module digital OUT / DO
@@ -28,6 +31,7 @@ const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 5000UL; // BENCH TEST ONLY: 5 s between FEEDs
 
 Servo feederServo;
+TM1637Display cooldownDisplay(TM1637_CLK_PIN, TM1637_DIO_PIN);
 
 // Keep both LCD addresses ready, but don't talk to the LCD when absent.
 // Broken/borrowed LCD should be physically disconnected for now.
@@ -115,6 +119,33 @@ ServoState servoState = IDLE;
 unsigned long stageStartedAt = 0;
 unsigned long lastFeedAt = 0;
 bool hasFed = false;
+unsigned long lastShownCooldownSeconds = 0xFFFFFFFFUL;
+
+unsigned long remainingCooldownSeconds(unsigned long now) {
+  if (!hasFed) return 0;
+  const unsigned long elapsed = (unsigned long)(now - lastFeedAt);
+  if (elapsed >= COOLDOWN_MS) return 0;
+  const unsigned long remainingMs = COOLDOWN_MS - elapsed;
+  return (remainingMs + 999UL) / 1000UL; // Round up: 5 -> 4 ... -> 0
+}
+
+// Non-blocking MM:SS display updates, only when a second changes.
+// Tracks Arduino's *automatic* cooldown, starting with each accepted servo cycle.
+// The D2 manual button can still override automatic cooldown.
+void updateCooldownDisplay() {
+  const unsigned long secondsLeft = remainingCooldownSeconds(millis());
+  if (secondsLeft == lastShownCooldownSeconds) return;
+  lastShownCooldownSeconds = secondsLeft;
+  const unsigned int minutes = secondsLeft / 60UL;
+  const unsigned int seconds = secondsLeft % 60UL;
+  const int mmss = (int)(minutes * 100U + seconds);
+  cooldownDisplay.showNumberDecEx(mmss, 0b01000000, true, 4, 0);
+}
+
+void printCooldownStatus() {
+  Serial.print(F("COOLDOWN "));
+  Serial.println(remainingCooldownSeconds(millis()));
+}
 
 char lineBuffer[24];
 uint8_t lineLength = 0;
@@ -191,6 +222,7 @@ void startServoCycle(bool manual) {
   feederServo.write(OPEN_ANGLE);
   digitalWrite(LED_BUILTIN, HIGH);
   updateStatusLEDs();
+  updateCooldownDisplay(); // Show 00:05 or 01:00 immediately on FEED start
 }
 
 void updateManualButton() {
@@ -253,6 +285,10 @@ void scanI2CBus() {
 }
 
 void handleCommand(const char *command) {
+  if (strcmp(command, "COOLDOWN_STATUS") == 0) {
+    printCooldownStatus();
+    return;
+  }
   if (strcmp(command, "FOOD_STATUS") == 0) {
     printFoodStatus();
     return;
@@ -374,6 +410,8 @@ void setup() {
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_YELLOW_PIN, OUTPUT);
   pinMode(LED_RED_PIN, OUTPUT);
+  cooldownDisplay.setBrightness(4, true); // 0..7; 4 limits LED current
+  updateCooldownDisplay(); // On boot: 00:00 (ready)
   pinMode(IR_SENSOR_PIN, INPUT_PULLUP); // Typical LM393 open-collector OUT
   foodRawPresent = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
   foodRawChangedAt = millis();
@@ -398,4 +436,5 @@ void loop() {
   updateManualButton();
   readSerialCommands();
   updateServo();
+  updateCooldownDisplay();
 }
