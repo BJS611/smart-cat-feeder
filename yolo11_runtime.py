@@ -35,7 +35,13 @@ def load_detector():
     return model
 
 
-def open_camera(cv2, source):
+def open_camera(cv2, source, width=640, height=480, fps=None, fourcc=None):
+    """Open the camera with optional low-bandwidth webcam format settings.
+
+    Caller can request MJPG for a USB webcam, but actual negotiated format is
+    reported separately (some V4L2 devices silently ignore unsupported modes).
+    The defaults preserve pi5_ai_test.py's existing camera behavior.
+    """
     source = int(source) if str(source).isdecimal() else source
     if isinstance(source, int):
         cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
@@ -46,8 +52,15 @@ def open_camera(cv2, source):
         cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise RuntimeError("Webcam gagal dibuka: %s. Cek v4l2-ctl --list-devices" % source)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    if fourcc and fourcc.upper() not in ("AUTO", "NONE"):
+        if len(fourcc) != 4:
+            cap.release()
+            raise ValueError("Camera FOURCC must be 4 letters, e.g. MJPG")
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc.upper()))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    if fps is not None:
+        cap.set(cv2.CAP_PROP_FPS, fps)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
