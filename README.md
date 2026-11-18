@@ -131,6 +131,32 @@ Konfigurasi penting di atas sketch:
 - **Arduino menolak FEED kedua selama 60 detik**.
 - Pesan serial: `PING` → `PONG`; `FEED` → `ACK FEED` lalu `DONE`; `STATUS` → status. Port `115200 baud`, satu perintah per baris.
 
+#### Alternatif: upload Arduino langsung dari SSH Raspberry Pi
+
+Jika tidak memakai Arduino IDE di laptop, instal **Arduino CLI ARM64 resmi** dan lakukan compile/upload melalui USB langsung pada Raspberry Pi:
+
+```bash
+sudo apt install -y curl
+mkdir -p ~/.local/bin
+curl -fL https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_ARM64.tar.gz \
+  -o /tmp/arduino-cli-arm64.tar.gz
+tar -xzf /tmp/arduino-cli-arm64.tar.gz -C ~/.local/bin arduino-cli
+
+~/.local/bin/arduino-cli version
+~/.local/bin/arduino-cli core update-index
+~/.local/bin/arduino-cli core install arduino:avr
+~/.local/bin/arduino-cli lib install Servo
+
+cd ~/smart-cat-feeder
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo
+~/.local/bin/arduino-cli board list
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  -p /dev/ttyACM0 arduino/smart_cat_feeder_servo
+```
+
+Ubah `/dev/ttyACM0` jika board terdeteksi di port lain. Untuk port permission denied, tambahkan akun ke `dialout` dan login ulang sebelum upload. **Hentikan `live_cam.py` dan tutup Serial Monitor sebelum upload Arduino.**
+
 ### 2) Periksa port USB di Raspberry Pi
 
 ```bash
