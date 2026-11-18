@@ -115,6 +115,56 @@ Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka 
 
 **Uji pertama tanpa memasang lengan servo ke mekanisme dispenser, dan tanpa makanan.** Program ini belum memakai HX711/load cell; gerakan servo tidak menjamin gram pakan tertentu. Jangan gunakan sebagai feeder otomatis tanpa batasan mekanis, porsi dan pengujian keselamatan.
 
+### Tombol pemberian pakan manual darurat (Arduino D2)
+
+**Istilah penting:** tombol ini adalah **MANUAL FEED OVERRIDE**, yang menggerakkan servo saat ditekan. **Bukan emergency stop**, bukan pemutus daya, dan bukan mekanisme pengaman keselamatan mesin.
+
+**Koneksi pushbutton momentary NO** (normally open):
+- Salah satu kontak → **D2 Arduino Uno**.
+- Kontak lainnya → **GND Arduino Uno**.
+- Firmware memakai `pinMode(2, INPUT_PULLUP)`; tidak perlu resistor tambahan.
+- Jika tombol empat kaki, gunakan dua pin yang akan **tersambung hanya ketika tombol ditekan** (periksa dengan multimeter).
+- MG996R: sinyal D9, **daya servo eksternal 5–6V**, GND servo disambungkan dengan GND Arduino. **Jangan** ambil daya motor servo dari pin 5V Arduino/Pi.
+
+**Perilaku:**
+1. Tombol tertekan stabil selama 35 ms → satu siklus servo buka lalu tutup, dengan log serial `EVENT MANUAL_FEED`.
+2. Menahan tombol tidak memicu siklus berikutnya; harus lepas dan tekan ulang.
+3. Tombol manual **tidak memerlukan YOLO11, koneksi serial Pi, atau cooldown otomatis**. Ada jarak minimum anti-repeat tombol 2 detik, dan tidak dapat memulai siklus baru saat servo sedang bekerja.
+4. Siklus tombol manual juga memulai cooldown perintah FEED otomatis (5 detik pada sketch bench atau 60 detik pada sketch normal).
+5. Perintah serial `EMERGENCY` yang sudah ada adalah **software lock/stop**: bila aktif, baik FEED otomatis maupun tombol manual akan diblokir sampai perintah `RESET`. Ini berbeda dari tombol fisik manual.
+6. Saat LCD nanti tersedia, tombol manual menunjukkan status `Emergency` selama gerakan; status otomatis menunjukkan `Feeding`. Keduanya kembali ke `Idle` setelah servo selesai.
+
+**LCD tetap disimpan di firmware, tetapi sekarang opsional.** Pada boot, Arduino memeriksa alamat I2C `0x27` dan `0x3F`. Jika LCD tidak terpasang, board mencetak `LCD NOT CONNECTED - continue without LCD` dan fungsi servo/button tetap jalan. LCD rusak harus **dilepas secara fisik** dari kabel. Ketika LCD baru datang, sambungkan LCD (VCC=5V, GND=GND, SDA=A4, SCL=A5) **saat daya mati**, kemudian hidupkan ulang Arduino. Jika alamatnya 0x27 atau 0x3F, firmware akan menggunakannya secara otomatis, **tanpa flash ulang**.
+
+**Update dan upload** (gunakan sketch bench 5 detik yang terakhir digunakan):
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+
+# Tutup live_cam.py dan serial monitor sebelum upload
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+**Tes tombol langsung dari Arduino:** biarkan Arduino mendapat daya melalui USB (Pi bisa menjalankan atau tidak menjalankan YOLO) dan servo mendapat daya eksternal. Tekan tombol D2 sekali untuk satu siklus. **Jangan hubungkan hopper atau pakan saat tes.**
+
+**Opsional: pantau log tombol dari Pi** tanpa mengirim perintah gerakan:
+
+```bash
+.venv/bin/python serial_servo_test.py --port /dev/ttyUSB0 --button-monitor
+```
+
+Saat ditekan, output normal berisi `EVENT MANUAL_FEED`, `STATE CLOSING` dan `DONE`. Hentikan dengan Ctrl+C. Program Python monitor membuka port Uno sendiri; jangan jalankan bersama `live_cam.py` atau Serial Monitor lain.
+
+**Mode YOLO11 otomatis masih berfungsi** dengan skrip dan parameter sebelumnya. Sketsa regular `arduino/smart_cat_feeder_servo` tetap memiliki cooldown otomatis 60 detik; keduanya memiliki tombol D2 yang sama. Kode LCD tetap dipertahankan pada kedua sketch.
+
+**Keamanan:** Ini **bench test tanpa pakan**. Tombol manual dapat mengabaikan jadwal dan pembatasan otomatis; jangan menggunakannya untuk memberi makan nyata tanpa mekanisme penakar, pembatasan porsi, dan uji fail-safe.
+
+---
+
 ### 1) Upload sketch Arduino (C++)
 
 Pada Arduino IDE, pilih **Arduino Uno** dan port USB Arduino. Buka file:
