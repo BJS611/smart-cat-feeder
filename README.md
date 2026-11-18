@@ -76,6 +76,36 @@ Hanya kucing:
 
 Laporan tersedia di `results/summary.json` dan `results/last_frame.jpg`. Pada desktop Raspberry Pi, gunakan `--display` untuk jendela OpenCV.
 
+## Perbaikan FPS Logitech C270 terverifikasi (2026-11-18)
+
+**Bukti perangkat:** webcam C270 di `/dev/video0` menghasilkan **7,08–9,13 FPS** saat diuji tanpa YOLO/Arduino meskipun MJPG 640×480 30 FPS diminta. Pengujian V4L2 menemukan `auto_exposure=3` dan `exposure_dynamic_framerate=1`. Setelah `exposure_dynamic_framerate=0`, uji kamera saja menghasilkan **28,56, 29,80, 29,80 FPS**. Ini mengisolasi **dynamic exposure framerate** sebagai akar masalah capture-FPS, bukan model YOLO11 atau JPEG encoder.
+
+`live_cam.py` terbaru sekarang otomatis menjalankan:
+
+```bash
+v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
+```
+
+sebelum membuka webcam, lalu memverifikasi nilainya setelah OpenCV membuka kamera. Output yang benar: `[CAMERA TUNE] Dynamic FPS OFF ...` dan `[CAMERA TUNE] /dev/video0 -> exposure_dynamic_framerate: 0`. Jika driver tidak mendukung kontrol ini, startup akan memberi peringatan tetapi tidak gagal. Flag `--allow-dynamic-fps` tersedia untuk menonaktifkan penyesuaian tersebut. Pengaturan tidak mengubah Arduino, TM1637, sensor, atau cooldown.
+
+**Jalankan lagi (bench tanpa hopper atau makanan):**
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+.venv/bin/python -m py_compile live_cam.py yolo11_runtime.py cat_servo_bridge.py
+.venv/bin/python live_cam.py \
+  --source 0 --port 8767 --imgsz 320 --conf 0.40 \
+  --camera-fourcc MJPG --camera-fps 30 --stream-fps 15 \
+  --jpeg-quality 65 --interval 0.4 --box-ttl 1.0 \
+  --cat-only --arduino-port /dev/ttyUSB0 \
+  --stable-hits 3 --cooldown-seconds 5 --rearm-seconds 5 --bench-test
+```
+
+**Target:** `[PERF] camera` mendekati 30 FPS, sedangkan `stream` sekitar 15 FPS karena sengaja dibatasi, dan `YOLO` sekitar 2,5 inferensi/detik sesuai interval 0,4 detik. Pengukuran baru pada aplikasi lengkap tetap dibutuhkan; uji kamera saja belum membuktikan masalah freeze/abort sudah selesai. Jika capture tetap rendah, cocokkan pengaturan setelah kamera dibuka dan periksa USB serta catu daya. Saat menjalankan penuh, periksa `vcgencmd get_throttled`, `free -h` dan log kernel untuk isu freeze secara terpisah.
+
+---
+
 ## Low-latency live video (audit & optimasi 2026-11-18)
 
 **Temuan audit sebelum optimasi:**
