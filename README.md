@@ -254,6 +254,77 @@ Prosesnya adalah **3 hasil inferensi kucing berturut-turut** → satu gerakan se
 
 Untuk kembali ke default yang lebih aman, upload ulang sketch normal dari folder `arduino/smart_cat_feeder_servo` dan **hilangkan** `--bench-test`, gunakan `--cooldown-seconds 60`. Tanpa HX711, kontrol porsi, dan mekanisme pengunci, jangan gunakan deteksi otomatis sebagai pengumpan makanan tanpa pengawasan.
 
+### LCD 16x2 I2C pada Arduino Uno: Idle, Feeding, Emergency
+
+**Perangkat:** LCD 1602 harus memakai I2C backpack dengan pin `GND VCC SDA SCL`. Jika modul LCD hanya mempunyai 16 pin paralel dan tidak ada backpack, rangkaian berikut belum dapat dipakai.
+
+**Wiring (Arduino Uno R3):**
+
+| LCD I2C | Arduino Uno |
+| --- | --- |
+| GND | GND |
+| VCC | 5V |
+| SDA | A4 (SDA) |
+| SCL | A5 (SCL) |
+
+Servo tetap di D9 dengan **power eksternal** 5–6V dan common ground, sedangkan Arduino tetap menggunakan USB serial `/dev/ttyUSB0` ke Raspberry Pi.
+
+**Tampilan LCD dua baris (16 kolom):**
+
+- Baris 1 selalu `SMART CAT FEEDER` (16 karakter).
+- Baris 2 adalah `Idle` saat board siap, `Feeding` selama servo menjalankan siklus buka-tutup (perintah serial `FEED`), atau `Emergency` bila perintah serial `EMERGENCY` diterima.
+- `EMERGENCY` saat ini **simulasi status lewat serial**, bukan tombol fisik atau sistem emergency-stop bersertifikasi. Perintah itu langsung meminta servo kembali ke posisi tutup dan menolak `FEED` berikutnya sampai `RESET`. Tombol manual untuk mode emergency akan ditambahkan pada tahap berikutnya.
+- LCD hanya di-refresh **ketika status berganti**, supaya tidak berkedip.
+
+**Alamat I2C awal** diset ke `0x27`. Jika backlight menyala tetapi tulisan tidak muncul, periksa potensiometer kontras pada backpack, SDA/SCL, alamat alternatif `0x3F`, dan library LCD yang terpasang. Ganti `0x27` pada sketch bila alamat modul berbeda.
+
+**Wajib upload firmware Arduino yang mendukung I2C sekali.** Script Python sendiri tidak dapat mengendalikan LCD yang terhubung ke pin Arduino bila firmware Arduino sebelumnya belum mempunyai kode LCD. Setelah upload sekali, penggantian status `Idle` ↔ `Feeding` berlangsung otomatis dari serial Python sebelumnya tanpa flash ulang.
+
+Di **SSH Raspberry Pi**, hentikan `live_cam.py` dan tutup Serial Monitor, kemudian:
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+~/.local/bin/arduino-cli lib install "LiquidCrystal I2C"
+
+# Untuk firmware bench test cooldown 5 detik yang sedang digunakan:
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+Jika kamu tidak memakai firmware bench 5 detik, compile/upload folder `arduino/smart_cat_feeder_servo` (cooldown 60 detik) sebagai gantinya.
+
+**Tes LCD tanpa menggerakkan servo:**
+
+```bash
+.venv/bin/python serial_servo_test.py \
+  --port /dev/ttyUSB0 --lcd-demo
+```
+
+Tes tersebut menampilkan `Idle` sebentar, mengirim perintah `EMERGENCY` sehingga LCD menunjukkan `Emergency` sekitar 4 detik, kemudian `RESET` kembali ke `Idle`. Script memakai **satu koneksi serial** sehingga reset otomatis Uno saat port dibuka tidak mengganggu demonstrasi.
+
+**Tes status Feeding dengan servo tanpa makanan dan mekanisme:**
+
+```bash
+.venv/bin/python serial_servo_test.py \
+  --port /dev/ttyUSB0 --feed
+```
+
+LCD akan menampilkan `Feeding` sewaktu servo bergerak, kemudian `Idle` ketika siklus selesai. Gerakan servo hanya untuk pengujian tanpa pakan.
+
+**Mode kamera YOLO11 + LCD + servo tetap sama:**
+
+```bash
+.venv/bin/python live_cam.py --source 0 --port 8767 --imgsz 320 \
+  --cat-only --arduino-port /dev/ttyUSB0 \
+  --stable-hits 3 --cooldown-seconds 5 \
+  --rearm-seconds 5 --bench-test
+```
+
+Program di Raspberry Pi tetap memuat **satu model `models/yolo11.pt`**, tanpa usia. Perintah `FEED` yang dikirim Pi akan mengubah LCD secara otomatis. Jangan gunakan cooldown 5 detik dengan pakan asli; untuk uji feeder terpasang harus ada pengukuran porsi dan pengamanan hardware/software tambahan.
+
 ### Jika terjadi masalah
 
 | Masalah | Pemeriksaan |
