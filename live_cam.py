@@ -5,8 +5,10 @@ Access localhost:8767 via SSH tunnel from your laptop.
 """
 import argparse
 import json
+import socket
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from yolo11_runtime import draw_boxes, load_detector, open_camera, predict_boxes
@@ -17,43 +19,73 @@ class State:
     def __init__(self):
         self.lock = threading.Condition()
         self.stop = threading.Event()
+        self.started_at = time.monotonic()
         self.raw = None
+        self.raw_seq = 0
+        self.raw_time = None
         self.jpeg = None
+        self.jpeg_time = None
         self.seq = 0
         self.boxes = []
+        self.boxes_time = None
         self.frame_count = 0
+        self.encoded_frames = 0
         self.inferences = 0
         self.det_ms = None
+        self.encode_ms = None
+        self.jpeg_bytes = 0
+        self.capture_times = deque(maxlen=300)
+        self.encode_times = deque(maxlen=150)
+        self.infer_times = deque(maxlen=100)
         self.error = None
         self.serial_info = {"enabled": False, "reason": "Arduino belum diaktifkan"}
 
 
-def camera_worker(state, cap, cv2):
+def recent_fps(samples, now, started_at):
+    """Rolling 5 s FPS; report 0 when frames have stopped arriving."""
+    elapsed = min(5.0, max(0.5, now - started_at))
+    return round(sum(t >= now - 5.0 for t in samples) / elapsed, 1)
+
+
+def camera_worker(state, cap):
+    """Capture newest webcam frame without JPEG, drawing, or artificial sleeps."""
+    last_report = time.monotonic()
+    failures = 0
     try:
-        last_report = time.monotonic()
         while not state.stop.is_set():
             ok, frame = cap.read()
             if not ok:
-                state.error = "Webcam tidak mengirim frame."
-                break
+                failures += 1
+                if failures >= 10:
+                    raise RuntimeError("Webcam gagal membaca 10 frame berturut-turut")
+                state.stop.wait(0.05)
+                continue
+
+            failures = 0
+            now = time.monotonic()
             with state.lock:
-                state.raw = frame.copy()
-                boxes = list(state.boxes)
+                # Assignment only; no frame-copy/encoding in the capture loop.
+                state.raw = frame
+                state.raw_seq += 1
+                state.raw_time = now
                 state.frame_count += 1
-            draw_boxes(cv2, frame, boxes)
-            encoded_ok, encoded = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
-            )
-            if encoded_ok:
+                state.capture_times.append(now)
+                state.lock.notify_all()
+
+            if now - last_report >= 10.0:
                 with state.lock:
-                    state.jpeg = encoded.tobytes()
-                    state.seq += 1
-                    state.lock.notify_all()
-            if time.monotonic() - last_report > 10:
-                print("[CAMERA] frames=%d, inferensi=%d, objek=%d" %
-                      (state.frame_count, state.inferences, len(boxes)), flush=True)
-                last_report = time.monotonic()
-            time.sleep(0.03)
+                    capture_fps = recent_fps(state.capture_times, now, state.started_at)
+                    stream_fps = recent_fps(state.encode_times, now, state.started_at)
+                    infer_fps = recent_fps(state.infer_times, now, state.started_at)
+                    totals = (state.frame_count, state.encoded_frames, state.inferences)
+                    timings = (state.det_ms, state.encode_ms)
+                print(
+                    "[PERF] camera=%.1f fps, stream=%.1f fps, YOLO=%.1f fps | "
+                    "frames=%d encoded=%d inferences=%d | det=%s ms jpeg=%s ms" %
+                    (capture_fps, stream_fps, infer_fps, *totals, *timings),
+                    flush=True,
+                )
+                last_report = now
     except Exception as exc:
         state.error = "Camera error: %s" % exc
         print("[ERROR]", state.error, flush=True)
@@ -64,25 +96,99 @@ def camera_worker(state, cap, cv2):
         cap.release()
 
 
-def inference_worker(state, model, args, cat_gate=None):
-    while not state.stop.is_set():
+def encoder_worker(state, cv2, args):
+    """Render/encode only the latest frame at a bounded FPS (no frame backlog)."""
+    last_seq = 0
+    next_due = 0.0
+    period = 1.0 / args.stream_fps
+    try:
+        while not state.stop.is_set():
+            delay = next_due - time.monotonic()
+            if delay > 0 and state.stop.wait(delay):
+                break
+
+            with state.lock:
+                state.lock.wait_for(
+                    lambda: state.raw_seq != last_seq or state.stop.is_set(),
+                    timeout=0.5,
+                )
+                if state.stop.is_set():
+                    break
+                if state.raw is None or state.raw_seq == last_seq:
+                    continue
+                frame = state.raw
+                last_seq = state.raw_seq
+                boxes = (
+                    tuple(state.boxes)
+                    if state.boxes_time is not None
+                    and time.monotonic() - state.boxes_time <= args.box_ttl
+                    else ()
+                )
+
+            begin = time.perf_counter()
+            annotated = frame.copy()
+            if boxes:
+                draw_boxes(cv2, annotated, boxes)
+            encoded_ok, encoded = cv2.imencode(
+                ".jpg", annotated,
+                [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
+            )
+            finished_at = time.monotonic()
+            if encoded_ok:
+                with state.lock:
+                    state.jpeg = encoded.tobytes()
+                    state.jpeg_time = finished_at
+                    state.jpeg_bytes = len(state.jpeg)
+                    state.encoded_frames += 1
+                    state.encode_times.append(finished_at)
+                    state.encode_ms = round((time.perf_counter() - begin) * 1000, 1)
+                    state.seq += 1
+                    state.lock.notify_all()
+            next_due = max(begin + period, finished_at)
+    except Exception as exc:
+        state.error = "JPEG encode error: %s" % exc
+        print("[ERROR]", state.error, flush=True)
+        state.stop.set()
         with state.lock:
-            frame = None if state.raw is None else state.raw.copy()
-        if frame is None:
-            state.stop.wait(0.1)
-            continue
+            state.lock.notify_all()
+
+
+def inference_worker(state, model, args, cat_gate=None):
+    """YOLO processes distinct, newest frames; never queues historical frames."""
+    last_seq = 0
+    next_due = 0.0
+    while not state.stop.is_set():
+        delay = next_due - time.monotonic()
+        if delay > 0 and state.stop.wait(delay):
+            break
+
+        with state.lock:
+            state.lock.wait_for(
+                lambda: state.raw_seq != last_seq or state.stop.is_set(),
+                timeout=0.5,
+            )
+            if state.stop.is_set():
+                break
+            if state.raw is None or state.raw_seq == last_seq:
+                continue
+            frame = state.raw.copy()
+            last_seq = state.raw_seq
+
         begin = time.perf_counter()
         try:
             boxes = predict_boxes(
                 model, frame, imgsz=args.imgsz,
-                conf=args.conf, cat_only=args.cat_only
+                conf=args.conf, cat_only=args.cat_only,
             )
             dt_ms = (time.perf_counter() - begin) * 1000.0
             if cat_gate is not None:
                 cat_gate.observe(any(b[4] == 15 for b in boxes))
+            now = time.monotonic()
             with state.lock:
                 state.boxes = boxes
+                state.boxes_time = now
                 state.inferences += 1
+                state.infer_times.append(now)
                 state.det_ms = round(dt_ms, 1)
                 if cat_gate is not None:
                     state.serial_info = cat_gate.snapshot()
@@ -93,7 +199,7 @@ def inference_worker(state, model, args, cat_gate=None):
             with state.lock:
                 state.lock.notify_all()
             return
-        state.stop.wait(max(0, args.interval - (time.perf_counter() - begin)))
+        next_due = max(begin + args.interval, time.monotonic())
 
 
 PAGE = """<!doctype html><html lang="id"><head>
