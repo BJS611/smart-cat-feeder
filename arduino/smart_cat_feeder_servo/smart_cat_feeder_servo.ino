@@ -109,14 +109,16 @@ void startServoCycle(bool manual) {
   stageStartedAt = now;
   servoState = OPENING;
   manualCycle = manual;
+  // A manual cycle must also start the automatic cooldown.
+  // Without this, YOLO could instantly trigger another feed after button release.
+  lastFeedAt = now;
+  hasFed = true;
   if (manual) {
     lastManualAt = now;
     manualHasRun = true;
     showScreen(SCREEN_EMERGENCY);
     Serial.println(F("EVENT MANUAL_FEED"));
   } else {
-    lastFeedAt = now;
-    hasFed = true;
     showScreen(SCREEN_FEEDING);
   }
   feederServo.write(OPEN_ANGLE);
