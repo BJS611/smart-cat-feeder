@@ -76,6 +76,59 @@ Hanya kucing:
 
 Laporan tersedia di `results/summary.json` dan `results/last_frame.jpg`. Pada desktop Raspberry Pi, gunakan `--display` untuk jendela OpenCV.
 
+## Low-latency live video (audit & optimasi 2026-11-18)
+
+**Temuan audit sebelum optimasi:**
+- Dalam `live_cam.py` lama, satu thread `camera_worker` melakukan `cap.read()`, `frame.copy()`, menggambar box YOLO, `cv2.imencode(".jpg")` pada setiap frame, lalu `sleep(0.03)`. Kerja capture dan encoding saling memblokir; saat CPU Raspberry Pi 5 sibuk dengan YOLO, frame browser tersendat.
+- `--interval=0.4` sengaja membatasi YOLO hanya sekitar 2,5 inferensi/detik, sehingga bounding box tampak kurang responsif. Ini bukan bukti webcam berjalan pada 2,5 FPS.
+- `open_camera()` lama hanya meminta resolusi 640x480 tanpa memaksa mode USB kamera MJPG/FPS; dukungan format harus diverifikasi pada webcam sebenarnya.
+- `/stream.mjpg` sudah membagikan frame JPEG terbaru dan tidak memakai antrean Python tanpa batas, tetapi TCP/browser bisa tetap menambah delay ketika koneksi lambat.
+- Permintaan berulang `/hybridaction/zybTrackerStatisticsAction` tidak berasal dari halaman proyek; server tetap membalas 404 tetapi sekarang menghindari spam terminal dari prefix tersebut.
+
+**Perubahan yang diterapkan:**
+1. Tiga pekerja independen: `camera_worker` (capture latest-only), `inference_worker` (YOLO newest frame), dan `encoder_worker` (gambar box + JPEG pada FPS terbatas). Tidak ada `sleep(0.03)` pada capture.
+2. Default live mode meminta kamera **MJPG, 640x480, 30 FPS**, dengan log hasil negosiasi V4L2. Apabila MJPG tidak didukung, uji `--camera-fourcc AUTO` atau `--camera-fourcc YUYV` dan cek output `[CAMERA OK]`.
+3. Encoding browser dibatasi **15 FPS** dengan kualitas JPEG **65**, mengurangi CPU/bandwidth. Perintah `--stream-fps` dan `--jpeg-quality` bisa disesuaikan.
+4. Bounding box lama disembunyikan setelah 1 detik tanpa hasil inferensi baru (`--box-ttl 1.0`). CatGate, protokol Arduino, hardware servo/IR/LED/TM1637, dan batas cooldown **tidak diubah**.
+5. Endpoint `/status` sekarang mengembalikan telemetry `performance.camera_fps`, `performance.stream_fps`, `performance.yolo_fps`, `performance.jpeg_encode_ms`, `performance.jpeg_kb`, `performance.camera_frame_age_ms`, dan `performance.jpeg_frame_age_ms`. Console `[PERF]` setiap sekitar 10 detik memakai laju 5 detik terakhir.
+6. Untuk setiap koneksi MJPEG, aplikasi mengaktifkan `TCP_NODELAY` dan socket send buffer lebih kecil, dengan timeout untuk klien macet. Ini mengurangi peluang antrean panjang pada koneksi lambat tetapi tidak menjamin latensi browser nol.
+
+**Jalankan mode bench lengkap (tanpa pakan):**
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+.venv/bin/python -m py_compile live_cam.py yolo11_runtime.py
+
+.venv/bin/python live_cam.py \
+  --source 0 --port 8767 --imgsz 320 --conf 0.40 \
+  --camera-fourcc MJPG --camera-fps 30 \
+  --stream-fps 15 --jpeg-quality 65 --box-ttl 1.0 \
+  --interval 0.4 \
+  --cat-only --arduino-port /dev/ttyUSB0 \
+  --stable-hits 3 --cooldown-seconds 5 \
+  --rearm-seconds 5 --bench-test
+```
+
+Di laptop Parrot OS: `ssh -N -L 8767:127.0.0.1:8767 yolo@yolo11.local`; kunjungi `http://127.0.0.1:8767/`. Buka `http://127.0.0.1:8767/status` untuk membandingkan telemetri dengan rasa lag pada browser. Jangan jalankan dua aplikasi yang menggunakan port Arduino bersamaan.
+
+**Diagnostik bila masih drop**:
+
+```bash
+# Di Pi; periksa mode USB webcam dan format yang didukung.
+v4l2-ctl -d /dev/video0 --list-formats-ext
+# Periksa daya/thermal throttle (jika utilitas tersedia).
+vcgencmd get_throttled
+vcgencmd measure_temp
+# Jangan jalankan tes v4l2 yang membuka kamera saat live_cam.py masih memakai /dev/video0.
+```
+
+Jika `[PERF] camera_fps` dan `stream_fps` tetap tinggi tetapi browser tertinggal, selidiki SSH tunnel, Wi-Fi, ekstensi browser, dan decoding MJPEG. Jika `camera_fps` rendah, periksa format kamera/power/USB. Jika `jpeg_encode_ms` tinggi dan `stream_fps` rendah, turunkan `--stream-fps 10 --jpeg-quality 55`; jika `yolo_fps` rendah dan CPU penuh, jangan memaksa interval lebih kecil tanpa mengukur dampaknya.
+
+**Batasan:** perubahan source code sudah dikirim ke GitHub, tetapi belum diuji pada Pi fisik. Target `15 FPS` adalah batas encoding, bukan janji output; metrik dari hardware sesungguhnya diperlukan untuk konfirmasi. Laju YOLO sekitar 2,5 inferensi/detik adalah pembatasan sengaja, bukan FPS video streaming.
+
+---
+
 ## Live video di browser Parrot OS
 
 Di terminal SSH **Raspberry Pi**:
