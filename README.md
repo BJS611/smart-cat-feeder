@@ -66,7 +66,7 @@ bash install_pi.sh
 
 Untuk **repository private**, gunakan GitHub CLI, SSH key, atau credential GitHub dengan izin membaca repository; jangan menaruh personal access token di skrip/README. Alternatif transfer lewat laptop memakai `scp -r` setelah repository diunduh di laptop.
 
-Instalasi `install_pi.sh` membuat `.venv` terisolasi dan memasang `ultralytics` (beserta PyTorch/OpenCV). Dependency dan wheel ARM64 membutuhkan koneksi internet serta ruang disk beberapa GB. **Jangan** menggunakan `sudo pip` atau `--break-system-packages`. Proses instalasi pertama dapat berat pada microSD.
+Instalasi `install_pi.sh` membuat ulang `.venv` terisolasi dan memasang **PyTorch 2.11.0+cpu serta TorchVision 0.26.0+cpu dari indeks CPU resmi PyTorch**, kemudian Ultralytics/OpenCV. Perangkat Raspberry Pi 5 tidak menggunakan CUDA NVIDIA; jika sebelumnya muncul unduhan `nvidia_cublas` atau `No space left on device`, bersihkan cache dengan `rm -rf ~/.cache/pip && sudo apt clean`, periksa `df -h /`, lalu jalankan `git pull --ff-only && bash install_pi.sh` untuk memakai installer yang sudah diperbaiki. Jangan menggunakan `sudo pip` atau `--break-system-packages`. Perhatikan bahwa menjalankan ulang installer akan membuat ulang `.venv` proyek.
 
 Verifikasi bobot model:
 
@@ -141,7 +141,8 @@ cat results/summary.json
 | Gejala | Tindakan |
 | --- | --- |
 | `python3 -m venv` gagal | `sudo apt install python3-venv` lalu ulangi `bash install_pi.sh` |
-| `torch`/`ultralytics` gagal diinstal | Pastikan `uname -m` = `aarch64`, OS 64-bit, cukup ruang; simpan log lengkap `pip` |
+| `torch`/`ultralytics` gagal diinstal | Pastikan `uname -m` = `aarch64`, OS 64-bit, cukup ruang; jalankan `git pull --ff-only && bash install_pi.sh` setelah pembaruan installer CPU-only; simpan log lengkap `pip` |
+| `nvidia_cublas` ratusan MB / `No space left on device` | Installer lama memakai dependency CUDA dari PyPI. Bersihkan `~/.cache/pip`, jalankan installer terbaru yang mengambil Torch/TorchVision CPU-only dari indeks PyTorch. |
 | Kamera gagal dibuka | `lsusb`, `v4l2-ctl --list-devices`; ganti `--source`; pastikan tidak digunakan aplikasi lain |
 | Izin `/dev/video*` ditolak | `groups`, `ls -l /dev/video0`; pertimbangkan menambahkan akun ke grup `video` lalu login ulang |
 | Raspberry Pi lambat | Kurangi `--imgsz` ke 320, naikkan `--every`, sediakan pendinginan; evaluasi export NCNN nantinya |
