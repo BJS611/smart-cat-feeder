@@ -115,6 +115,62 @@ Jika `yolo11.local` gagal terdeteksi, ganti dengan IP Raspberry Pi. Jangan buka 
 
 **Uji pertama tanpa memasang lengan servo ke mekanisme dispenser, dan tanpa makanan.** Program ini belum memakai HX711/load cell; gerakan servo tidak menjamin gram pakan tertentu. Jangan gunakan sebagai feeder otomatis tanpa batasan mekanis, porsi dan pengujian keselamatan.
 
+### TM1637 4 digit: countdown cooldown Arduino
+
+**Fungsi:** display TM1637 4 digit menampilkan **MM:SS** sejak satu siklus servo dimulai (baik perintah FEED dari YOLO11 maupun tombol manual D2), menggunakan cooldown otomatis yang sudah ditetapkan di sketch.
+
+**Kabel:**
+
+| TM1637 | Arduino Uno |
+| --- | --- |
+| VCC | 5V |
+| GND | GND |
+| CLK | **D10** |
+| DIO | **D11** |
+
+TM1637 **bukan** LCD I2C: tidak memakai pin A4/A5 dan tidak memerlukan resistor seri eksternal pada modul TM1637 standar. Servo tetap D9, tombol manual D2, LED hijau D4, LED kuning D5, IR D6, LED merah D7, LCD opsional A4/A5. Sambungkan saat Arduino dan semua sumber daya **dimatikan**.
+
+**Tampilan:**
+- Sketch `arduino/smart_cat_feeder_servo_bench_5s`: `00:05`, `00:04`, ..., `00:00`.
+- Sketch `arduino/smart_cat_feeder_servo`: `01:00`, `00:59`, ..., `00:00`.
+- Saat tidak ada cooldown: `00:00` (ready).
+- Countdown dimulai **ketika Arduino menerima FEED atau saat tombol manual berhasil memicu siklus**, bukan ketika gerakan servo sudah selesai.
+- Tidak ada `delay()` tambahan: tombol, sensor IR, LCD opsional, dan respons USB tetap diproses.
+- **Manual feed pada tombol D2 tetap dapat mengabaikan cooldown otomatis** sesuai desain sebelumnya, tetapi penekanan yang diterima akan memulai ulang tampilan cooldown. Ada batas anti-repeat tombol 2 detik. Program menolak trigger FEED dari YOLO11 selama cooldown.
+- Saat software lock `EMERGENCY` aktif, FEED diblokir meskipun display menunjukkan `00:00`; angka tersebut hanya menunjukkan waktu cooldown, bukan status keamanan atau sensor.
+- Banyak modul TM1637 mempunyai tanda titik dua di tengah. Jika fisiknya tidak mempunyai colon, digit tetap ditampilkan, tetapi titik dua mungkin tidak terlihat.
+
+**Library:** gunakan **TM1637 by Avishay Orpaz** (header `TM1637Display.h`). Pasang melalui Arduino CLI pada Raspberry Pi:
+
+```bash
+~/.local/bin/arduino-cli lib install "TM1637"
+```
+
+**Update dan upload firmware yang sedang digunakan (bench 5 detik):**
+
+```bash
+cd ~/smart-cat-feeder
+git pull --ff-only
+~/.local/bin/arduino-cli lib install "TM1637"
+
+# Pastikan live_cam.py dan Serial Monitor tidak membuka /dev/ttyUSB0
+~/.local/bin/arduino-cli compile --fqbn arduino:avr:uno \
+  arduino/smart_cat_feeder_servo_bench_5s
+~/.local/bin/arduino-cli upload --fqbn arduino:avr:uno \
+  --port /dev/ttyUSB0 arduino/smart_cat_feeder_servo_bench_5s
+```
+
+**Tes tanpa mengirim FEED otomatis dari Python**: jalankan pemantauan, lalu **tekan tombol manual D2** (servo tetap wajib memakai catu daya eksternal, tanpa hopper/pakan saat uji).
+
+```bash
+.venv/bin/python serial_servo_test.py \
+  --port /dev/ttyUSB0 --cooldown-monitor
+```
+
+Terminal akan menampilkan log `[COOLDOWN] 00:05` lalu turun ke `00:00` selaras dengan TM1637. Mode monitor hanya mengirim perintah baca `COOLDOWN_STATUS`, tidak menggerakkan servo sendiri. Jangan buka dua program bersamaan yang memakai port serial Arduino.
+
+**Wajib dicatat:** hitungan memakai `millis()` dari Arduino Uno. Arduino Uno clone CH340 dapat reset ketika serial dibuka ulang; reset juga menghapus waktu cooldown dan mengembalikan display ke `00:00`. Karena itu, pantau countdown **dalam satu sesi** dan jangan mengandalkannya sebagai pengaman tunggal pemberian pakan. Firmware ini masih prototype bench tanpa pengukuran berat/porsi makanan.
+
 ### Sensor infrared digital (D6) dan LED merah peringatan pakan habis (D7)
 
 **Asumsi modul:** sensor IR proximity/obstacle detection 3-pin atau 4-pin (seperti FC-51/LM393) dengan keluaran **digital OUT/DO**. Jenis IR break-beam atau modul analog murni memerlukan penyesuaian; jangan menebak pin. Modul reflektif mendeteksi objek pada satu titik, **tidak mengukur berat, volume, atau total pakan**. Sensor harus diuji terhadap warna, tekstur, jarak, sudut, cahaya, dan material dinding hopper sebelum digunakan.
