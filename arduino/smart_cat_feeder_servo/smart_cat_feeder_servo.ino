@@ -26,11 +26,12 @@ const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid 
 // Calibrate neutral for your specific servo; test without the hopper attached.
 const uint16_t SERVO_STOP_US = 1500;
 const uint16_t SERVO_RUN_US = 1700; // Use ~1300 for opposite direction if needed
-// Estimated full turns for a continuous-rotation servo (no position feedback).
-// Calibrate REVOLUTION_MS by measuring one full rotation at SERVO_RUN_US.
-// With the initial estimate below, FEED runs for ~2000 ms (target: 2 turns).
-const uint8_t TARGET_REVOLUTIONS = 2;
-const unsigned long REVOLUTION_MS = 1000UL;
+// Empirical calibration: measured about 180 degrees in 2000 ms at 1700 us.
+// Estimate one complete 360-degree rotation in 4000 ms at the SAME pulse.
+// Continuous rotation has no position feedback; actual turns depend on load/power.
+// Keep pulse unchanged so this timing estimate stays meaningful.
+const uint8_t TARGET_REVOLUTIONS = 1;
+const unsigned long REVOLUTION_MS = 4000UL;
 const unsigned long OPEN_MS = TARGET_REVOLUTIONS * REVOLUTION_MS;
 const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 60000UL; // Hard minimum between accepted FEEDs
