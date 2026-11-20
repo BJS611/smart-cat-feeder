@@ -3,7 +3,7 @@
 #include <LiquidCrystal_I2C.h>
 #include <TM1637Display.h>
 
-// Smart Cat Feeder - Arduino Uno R3 (MG996R prototype)
+// Smart Cat Feeder - Arduino Uno R3 (360-degree continuous rotation servo)
 // Serial over USB at 115200 baud.
 // Automatic FEED uses USB serial; D2 manual button works even when Pi is offline.
 // One press = one servo cycle, debounced. NO FOOD / BENCH TEST ONLY.
@@ -22,8 +22,10 @@ const unsigned long FOOD_PRESENT_CONFIRM_MS = 800UL;
 const uint8_t MANUAL_BUTTON_PIN = 2;       // Momentary NO push button: D2 <-> GND
 const unsigned long BUTTON_DEBOUNCE_MS = 35UL;
 const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid presses
-const uint8_t CLOSED_ANGLE = 20;     // Adjust before mounting the servo horn
-const uint8_t OPEN_ANGLE = 80;       // Adjust to avoid mechanical stops
+// Continuous-rotation servo: pulse width controls speed/direction, not angle.
+// Calibrate neutral for your specific servo; test without the hopper attached.
+const uint16_t SERVO_STOP_US = 1500;
+const uint16_t SERVO_RUN_US = 1700; // Use ~1300 for opposite direction if needed
 const unsigned long OPEN_MS = 650UL;
 const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 60000UL; // Hard minimum between accepted FEEDs
@@ -59,26 +61,29 @@ bool foodPresent = false;
 bool foodRawPresent = false;
 unsigned long foodRawChangedAt = 0;
 
+// Emergency > feeding > food level > idle; LCD refreshes on state changes.
 void showScreen(ScreenState next) {
-  if (lcd == nullptr) {
-    screenState = next;
-    return;
-  }
-  if (lcdReady && screenState == next) return;
+  const bool changed = (screenState != next);
+  screenState = next;
+  if (lcd == nullptr) return;
+  if (lcdReady && !changed) return;
 
   lcd->setCursor(0, 0);
-  lcd->print(F("SMART CAT FEEDER")); // 16 characters
+  lcd->print(F("SMART CAT FEEDER"));
   lcd->setCursor(0, 1);
   lcd->print(F("                "));
   lcd->setCursor(0, 1);
-  if (next == SCREEN_FEEDING) {
-    lcd->print(F("Feeding"));
-  } else if (next == SCREEN_EMERGENCY) {
+  if (next == SCREEN_EMERGENCY) {
     lcd->print(F("Emergency"));
+  } else if (next == SCREEN_FEEDING) {
+    lcd->print(F("Feeding"));
+  } else if (!foodLevelKnown) {
+    lcd->print(F("Cek Makanan"));
+  } else if (!foodPresent) {
+    lcd->print(F("Makanan Habis"));
   } else {
     lcd->print(F("Idle"));
   }
-  screenState = next;
   lcdReady = true;
 }
 
@@ -179,6 +184,8 @@ void updateFoodSensor() {
   foodPresent = observedFood;
   foodLevelKnown = true;
   updateStatusLEDs();
+  lcdReady = false;
+  showScreen(screenState);
   if (foodPresent) {
     Serial.println(F("FOOD PRESENT"));
   } else {
@@ -217,7 +224,7 @@ void startServoCycle(bool manual) {
   } else {
     showScreen(SCREEN_FEEDING);
   }
-  feederServo.write(OPEN_ANGLE);
+  feederServo.writeMicroseconds(SERVO_RUN_US);
   digitalWrite(LED_BUILTIN, HIGH);
   updateStatusLEDs();
   updateCooldownDisplay(); // Show 00:05 or 01:00 immediately on FEED start
@@ -308,7 +315,7 @@ void handleCommand(const char *command) {
   if (strcmp(command, "EMERGENCY") == 0) {
     // LCD emergency test only; physical button to be added later.
     emergencyActive = true;
-    feederServo.write(CLOSED_ANGLE);
+    feederServo.writeMicroseconds(SERVO_STOP_US);
     servoState = IDLE;
     manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
@@ -320,7 +327,7 @@ void handleCommand(const char *command) {
 
   if (strcmp(command, "RESET") == 0) {
     emergencyActive = false;
-    feederServo.write(CLOSED_ANGLE);
+    feederServo.writeMicroseconds(SERVO_STOP_US);
     servoState = IDLE;
     manualCycle = false;
     digitalWrite(LED_BUILTIN, LOW);
@@ -385,10 +392,10 @@ void updateServo() {
 
   if (servoState == OPENING &&
       (unsigned long)(now - stageStartedAt) >= OPEN_MS) {
-    feederServo.write(CLOSED_ANGLE);
+    feederServo.writeMicroseconds(SERVO_STOP_US);
     servoState = CLOSING;
     stageStartedAt = now;
-    Serial.println(F("STATE CLOSING"));
+    Serial.println(F("STATE CLOSING")); // Protocol preserved; motor is stopped
   }
 
   if (servoState == CLOSING &&
@@ -419,8 +426,8 @@ void setup() {
   stableButton = lastButtonRaw;
   lastButtonChangeAt = millis();
 
-  // Set closed target before attach to reduce unwanted movement at boot.
-  feederServo.write(CLOSED_ANGLE);
+  // Set neutral stop pulse before attaching to avoid unexpected movement at boot.
+  feederServo.writeMicroseconds(SERVO_STOP_US);
   feederServo.attach(SERVO_PIN);
   Serial.begin(115200);
   initOptionalLCD();
