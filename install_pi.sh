@@ -9,8 +9,6 @@ fi
 sudo apt update
 sudo apt install -y python3-venv python3-pip v4l-utils usbutils unzip libgl1 libglib2.0-0
 
-# Reset lingkungan proyek yang mungkin berisi dependensi NVIDIA dari percobaan sebelumnya.
-# Hanya menghapus .venv di folder repo, tidak menghapus model/kode/data.
 python3 -m venv --clear .venv
 .venv/bin/python -m pip install --upgrade pip
 

@@ -46,7 +46,7 @@ class GateTests(unittest.TestCase):
         gate.observe(False, now=25)
         for now in [26, 27, 28]:
             gate.observe(True, now=now)
-        self.assertEqual(bridge.calls, 1)  # cooldown
+        self.assertEqual(bridge.calls, 1)
         gate.observe(False, now=61)
         gate.observe(False, now=66)
         for now in [67, 68, 69]:

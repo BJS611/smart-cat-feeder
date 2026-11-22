@@ -7,7 +7,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 MODEL_PATH = BASE / "models" / "yolo11.pt"
-OFFICIAL_WEIGHT = "yolo11n.pt"  # Official Ultralytics filename; 'yolo11.pt' is local alias.
+OFFICIAL_WEIGHT = "yolo11n.pt"
 
 
 def load_detector():

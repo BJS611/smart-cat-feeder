@@ -21,9 +21,8 @@ class ArduinoBridge:
             timeout=0.15,
             write_timeout=1.0,
         )
-        # Opening the CH340 serial port can reset an Arduino Uno.
-        # The I2C LCD setup may delay startup, so a single early PING can
-        # be lost. Retry only the harmless PING command until board is ready.
+
+
         time.sleep(1.0)
         last_reply = None
         handshake_deadline = time.monotonic() + 12.0
@@ -211,7 +210,7 @@ class CatGate:
             and self.hit_streak >= self.stable_hits
             and now - self.last_attempt >= self.cooldown_seconds
         ):
-            # Disarm before contacting the Arduino so failures cannot cause a burst.
+
             self.armed = False
             self.last_attempt = now
             accepted, response = self.bridge.feed_once()
