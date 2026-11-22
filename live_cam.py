@@ -55,7 +55,7 @@ def configure_camera_exposure(source, allow_dynamic_fps=False, verify=False):
     elif source_text.startswith("/dev/video") and source_text[10:].isdecimal():
         device = source_text
     else:
-        return  # URLs, files, or non-V4L2 sources have no /dev/videoN control.
+        return
 
     if allow_dynamic_fps:
         print("[CAMERA TUNE] Dynamic FPS diizinkan oleh --allow-dynamic-fps", flush=True)
@@ -120,7 +120,7 @@ def camera_worker(state, cap):
             failures = 0
             now = time.monotonic()
             with state.lock:
-                # Assignment only; no frame-copy/encoding in the capture loop.
+
                 state.raw = frame
                 state.raw_seq += 1
                 state.raw_time = now
@@ -240,7 +240,7 @@ def inference_worker(state, model, args, cat_gate=None):
             )
             dt_ms = (time.perf_counter() - begin) * 1000.0
             now = time.monotonic()
-            # Publish detections before a potentially slow Arduino serial ACK.
+
             with state.lock:
                 state.boxes = boxes
                 state.boxes_time = now
@@ -341,7 +341,7 @@ def make_handler(state, cat_only):
                 self.end_headers()
                 self.wfile.write(payload)
             elif path == "/stream.mjpg":
-                # Don't accumulate seconds of outdated JPEGs in TCP send queues.
+
                 try:
                     self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
@@ -379,8 +379,8 @@ def make_handler(state, cat_only):
 
         def log_message(self, fmt, *values):
             path = self.path.split("?", 1)[0]
-            # These repeated foreign browser requests are outside this app.
-            # Still return HTTP 404 but avoid filling the Pi terminal with logs.
+
+
             if path not in ("/status", "/stream.mjpg") and not path.startswith("/hybridaction/"):
                 super().log_message(fmt, *values)
 
@@ -433,8 +433,8 @@ def main():
         parser.error("Port, confidence, resolusi, atau interval tidak valid")
 
     import cv2
-    # Apply BEFORE OpenCV opens V4L2; on the Logitech C270 this prevents
-    # auto-exposure from silently dropping capture to ~7.5 FPS.
+
+
     configure_camera_exposure(args.source, args.allow_dynamic_fps)
     model = load_detector()
     cap = open_camera(
