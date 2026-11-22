@@ -3,46 +3,36 @@
 #include <LiquidCrystal_I2C.h>
 #include <TM1637Display.h>
 
-// BENCH TEST ONLY - Arduino Uno MG996R, cooldown 5 seconds.
-// DO NOT connect to a hopper or use this version to dispense food.
-// Smart Cat Feeder - Arduino Uno R3 (360-degree continuous rotation servo)
-// Serial over USB at 115200 baud.
-// Automatic FEED uses USB serial; D2 manual button works even when Pi is offline.
-// One press = one servo cycle, debounced. NO FOOD / BENCH TEST ONLY.
-// Does not dispense controlled portions; bench-test without the hopper attached.
 
 const uint8_t SERVO_PIN = 9;
-const uint8_t TM1637_CLK_PIN = 10; // 4-digit cooldown display CLK
-const uint8_t TM1637_DIO_PIN = 11; // 4-digit cooldown display DIO
-const uint8_t LED_GREEN_PIN = 4;    // Green: Idle (normal, not moving)
-const uint8_t LED_YELLOW_PIN = 5;   // Yellow: Feeding or manual Emergency
-const uint8_t IR_SENSOR_PIN = 6;    // IR obstacle module digital OUT / DO
-const uint8_t LED_RED_PIN = 7;      // Red: food below minimum level / not yet verified
-const uint8_t IR_FOOD_PRESENT_LEVEL = LOW; // Common FC-51: LOW when pellets are in front
+const uint8_t TM1637_CLK_PIN = 10;
+const uint8_t TM1637_DIO_PIN = 11;
+const uint8_t LED_GREEN_PIN = 4;
+const uint8_t LED_YELLOW_PIN = 5;
+const uint8_t IR_SENSOR_PIN = 6;
+const uint8_t LED_RED_PIN = 7;
+const uint8_t IR_FOOD_PRESENT_LEVEL = LOW;
 const unsigned long FOOD_EMPTY_CONFIRM_MS = 3000UL;
 const unsigned long FOOD_PRESENT_CONFIRM_MS = 800UL;
-const uint8_t MANUAL_BUTTON_PIN = 2;       // Momentary NO push button: D2 <-> GND
+const uint8_t MANUAL_BUTTON_PIN = 2;
 const unsigned long BUTTON_DEBOUNCE_MS = 35UL;
-const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL; // Prevent accidental rapid presses
-// Continuous-rotation servo: pulse width controls speed/direction, not angle.
-// Calibrate neutral for your specific servo; test without the hopper attached.
+const unsigned long MANUAL_ANTI_REPEAT_MS = 2000UL;
+
+
 const uint16_t SERVO_STOP_US = 1500;
-const uint16_t SERVO_RUN_US = 1700; // Use ~1300 for opposite direction if needed
-// Empirical calibration: measured about 180 degrees in 2000 ms at 1700 us.
-// Estimate one complete 360-degree rotation in 4000 ms at the SAME pulse.
-// Continuous rotation has no position feedback; actual turns depend on load/power.
-// Keep pulse unchanged so this timing estimate stays meaningful.
+const uint16_t SERVO_RUN_US = 1700;
+
+
 const uint8_t TARGET_REVOLUTIONS = 1;
 const unsigned long REVOLUTION_MS = 4000UL;
 const unsigned long OPEN_MS = TARGET_REVOLUTIONS * REVOLUTION_MS;
 const unsigned long CLOSE_SETTLE_MS = 750UL;
-const unsigned long COOLDOWN_MS = 5000UL; // BENCH TEST ONLY: 5 s between FEEDs
+const unsigned long COOLDOWN_MS = 5000UL;
 
 Servo feederServo;
 TM1637Display cooldownDisplay(TM1637_CLK_PIN, TM1637_DIO_PIN);
 
-// Keep both LCD addresses ready, but don't talk to the LCD when absent.
-// Broken/borrowed LCD should be physically disconnected for now.
+
 LiquidCrystal_I2C lcd27(0x27, 16, 2);
 LiquidCrystal_I2C lcd3f(0x3F, 16, 2);
 LiquidCrystal_I2C *lcd = nullptr;
@@ -51,8 +41,7 @@ enum ScreenState : uint8_t { SCREEN_IDLE, SCREEN_FEEDING, SCREEN_EMERGENCY };
 ScreenState screenState = SCREEN_IDLE;
 bool lcdReady = false;
 
-// Serial "EMERGENCY" means a latched software STOP that blocks FEED.
-// The D2 pushbutton means MANUAL EMERGENCY FEED (not a safety E-stop).
+
 bool emergencyActive = false;
 
 bool lastButtonRaw = HIGH;
@@ -62,14 +51,13 @@ unsigned long lastManualAt = 0;
 bool manualHasRun = false;
 bool manualCycle = false;
 
-// Unconfirmed startup state is a warning. Never assume food exists until
-// sensor reading stays stable for FOOD_PRESENT_CONFIRM_MS.
+
 bool foodLevelKnown = false;
 bool foodPresent = false;
 bool foodRawPresent = false;
 unsigned long foodRawChangedAt = 0;
 
-// Emergency > feeding > food level > idle; LCD refreshes on state changes.
+
 void showScreen(ScreenState next) {
   const bool changed = (screenState != next);
   screenState = next;
@@ -137,12 +125,10 @@ unsigned long remainingCooldownSeconds(unsigned long now) {
   const unsigned long elapsed = (unsigned long)(now - lastFeedAt);
   if (elapsed >= COOLDOWN_MS) return 0;
   const unsigned long remainingMs = COOLDOWN_MS - elapsed;
-  return (remainingMs + 999UL) / 1000UL; // Round up: 5 -> 4 ... -> 0
+  return (remainingMs + 999UL) / 1000UL;
 }
 
-// Non-blocking MM:SS display updates, only when a second changes.
-// Tracks Arduino's *automatic* cooldown, starting with each accepted servo cycle.
-// The D2 manual button can still override automatic cooldown.
+
 void updateCooldownDisplay() {
   const unsigned long secondsLeft = remainingCooldownSeconds(millis());
   if (secondsLeft == lastShownCooldownSeconds) return;
@@ -161,9 +147,7 @@ void printCooldownStatus() {
 char lineBuffer[24];
 uint8_t lineLength = 0;
 
-// LED priority: yellow = servo movement or software emergency lock;
-// red = low/unknown food; green = confirmed food present and idle.
-// Red can remain ON together with yellow if the hopper is empty.
+
 void updateStatusLEDs() {
   const bool active = (servoState != IDLE) || emergencyActive;
   const bool lowOrUnknown = !foodLevelKnown || !foodPresent;
@@ -172,9 +156,7 @@ void updateStatusLEDs() {
   digitalWrite(LED_RED_PIN, lowOrUnknown ? HIGH : LOW);
 }
 
-// Poll the IR module non-blockingly, ignoring brief gaps between pellets.
-// Digital modules usually output LOW when they detect a nearby object.
-// Sensor is only a LOW-LEVEL INDICATOR, not an accurate measure of food mass.
+
 void updateFoodSensor() {
   const unsigned long now = millis();
   const bool observedFood = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
@@ -214,14 +196,14 @@ void printFoodStatus() {
   }
 }
 
-// Shared servo state machine, preserving existing FEED serial protocol.
+
 void startServoCycle(bool manual) {
   const unsigned long now = millis();
   stageStartedAt = now;
   servoState = OPENING;
   manualCycle = manual;
-  // A manual cycle must also start the automatic cooldown.
-  // Without this, YOLO could instantly trigger another feed after button release.
+
+
   lastFeedAt = now;
   hasFed = true;
   if (manual) {
@@ -235,7 +217,7 @@ void startServoCycle(bool manual) {
   feederServo.writeMicroseconds(SERVO_RUN_US);
   digitalWrite(LED_BUILTIN, HIGH);
   updateStatusLEDs();
-  updateCooldownDisplay(); // Show 00:05 or 01:00 immediately on FEED start
+  updateCooldownDisplay();
 }
 
 void updateManualButton() {
@@ -251,7 +233,7 @@ void updateManualButton() {
       (unsigned long)(now - lastButtonChangeAt) >= BUTTON_DEBOUNCE_MS) {
     stableButton = raw;
 
-    // HIGH->LOW stable edge: one cycle per fresh button press.
+
     if (stableButton == LOW) {
       if (emergencyActive) {
         Serial.println(F("MANUAL_IGNORED EMERGENCY_LOCK"));
@@ -261,7 +243,7 @@ void updateManualButton() {
                  (unsigned long)(now - lastManualAt) < MANUAL_ANTI_REPEAT_MS) {
         Serial.println(F("MANUAL_IGNORED ANTI_REPEAT"));
       } else {
-        startServoCycle(true); // Bypasses YOLO and automatic cooldown
+        startServoCycle(true);
       }
     }
   }
@@ -280,7 +262,7 @@ void printStatus() {
 }
 
 void scanI2CBus() {
-  // Diagnostic only. This does not move the servo or change the LCD state.
+
   uint8_t found = 0;
   Serial.println(F("I2C_SCAN_START"));
   for (uint8_t address = 1; address <= 126; address++) {
@@ -321,7 +303,7 @@ void handleCommand(const char *command) {
   }
 
   if (strcmp(command, "EMERGENCY") == 0) {
-    // LCD emergency test only; physical button to be added later.
+
     emergencyActive = true;
     feederServo.writeMicroseconds(SERVO_STOP_US);
     servoState = IDLE;
@@ -361,7 +343,7 @@ void handleCommand(const char *command) {
       return;
     }
 
-    // Keep original automatic FEED cooldown, independent of manual presses.
+
     startServoCycle(false);
     Serial.println(F("ACK FEED"));
     return;
@@ -403,7 +385,7 @@ void updateServo() {
     feederServo.writeMicroseconds(SERVO_STOP_US);
     servoState = CLOSING;
     stageStartedAt = now;
-    Serial.println(F("STATE CLOSING")); // Protocol preserved; motor is stopped
+    Serial.println(F("STATE CLOSING"));
   }
 
   if (servoState == CLOSING &&
@@ -423,18 +405,18 @@ void setup() {
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_YELLOW_PIN, OUTPUT);
   pinMode(LED_RED_PIN, OUTPUT);
-  cooldownDisplay.setBrightness(4, true); // 0..7; 4 limits LED current
-  updateCooldownDisplay(); // On boot: 00:00 (ready)
-  pinMode(IR_SENSOR_PIN, INPUT_PULLUP); // Typical LM393 open-collector OUT
+  cooldownDisplay.setBrightness(4, true);
+  updateCooldownDisplay();
+  pinMode(IR_SENSOR_PIN, INPUT_PULLUP);
   foodRawPresent = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
   foodRawChangedAt = millis();
-  updateStatusLEDs(); // Red until food is verified, then green when idle.
+  updateStatusLEDs();
   pinMode(MANUAL_BUTTON_PIN, INPUT_PULLUP);
   lastButtonRaw = digitalRead(MANUAL_BUTTON_PIN);
   stableButton = lastButtonRaw;
   lastButtonChangeAt = millis();
 
-  // Set neutral stop pulse before attaching to avoid unexpected movement at boot.
+
   feederServo.writeMicroseconds(SERVO_STOP_US);
   feederServo.attach(SERVO_PIN);
   Serial.begin(115200);
