@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from yolo11_runtime import draw_boxes, load_detector, open_camera, predict_boxes
 from cat_servo_bridge import ArduinoBridge, CatGate
+from motion_gate import MotionGate
 
 
 class State:
@@ -41,6 +42,9 @@ class State:
         self.infer_times = deque(maxlen=100)
         self.error = None
         self.serial_info = {"enabled": False, "reason": "Arduino belum diaktifkan"}
+        self.motion_active = True
+        self.motion_info = {"enabled": False, "active": True}
+        self.motion_samples = 0
 
 
 def configure_camera_exposure(source, allow_dynamic_fps=False, verify=False):
@@ -152,11 +156,51 @@ def camera_worker(state, cap):
         cap.release()
 
 
+def motion_worker(state, cv2, args):
+    gate = MotionGate(
+        threshold=args.motion_threshold,
+        min_fraction=args.motion_fraction,
+        hold_seconds=args.motion_hold,
+        sample_seconds=args.motion_sample,
+        warmup_seconds=args.motion_warmup,
+    )
+    last_seq = 0
+    while not state.stop.is_set():
+        with state.lock:
+            state.lock.wait_for(
+                lambda: state.raw_seq != last_seq or state.stop.is_set(),
+                timeout=0.5,
+            )
+            if state.stop.is_set():
+                break
+            if state.raw is None or state.raw_seq == last_seq:
+                continue
+            frame = state.raw.copy()
+            last_seq = state.raw_seq
+        try:
+            active = gate.observe(frame, cv2)
+            with state.lock:
+                if state.motion_active != active:
+                    print("[MOTION] %s" % ("YOLO ON" if active else "YOLO STANDBY"), flush=True)
+                state.motion_active = active
+                state.motion_info = gate.snapshot()
+                state.motion_samples += 1
+                if not active:
+                    state.boxes = []
+                    state.boxes_time = None
+                state.lock.notify_all()
+        except Exception as exc:
+            with state.lock:
+                state.error = "Motion detector error: %s" % exc
+                state.stop.set()
+                state.lock.notify_all()
+            return
+
+
 def encoder_worker(state, cv2, args):
     """Render/encode only the latest frame at a bounded FPS (no frame backlog)."""
     last_seq = 0
     next_due = 0.0
-    period = 1.0 / args.stream_fps
     try:
         while not state.stop.is_set():
             delay = next_due - time.monotonic()
@@ -201,7 +245,8 @@ def encoder_worker(state, cv2, args):
                     state.encode_ms = round((time.perf_counter() - begin) * 1000, 1)
                     state.seq += 1
                     state.lock.notify_all()
-            next_due = max(started_at + period, finished_at)
+            stream_fps = args.idle_stream_fps if args.motion_gate and not state.motion_active else args.stream_fps
+            next_due = max(started_at + 1.0 / stream_fps, finished_at)
     except Exception as exc:
         state.error = "JPEG encode error: %s" % exc
         print("[ERROR]", state.error, flush=True)
@@ -230,6 +275,15 @@ def inference_worker(state, model, args, cat_gate=None):
                 continue
             frame = state.raw.copy()
             last_seq = state.raw_seq
+            motion_active = state.motion_active
+
+        if args.motion_gate and not motion_active:
+            if cat_gate is not None:
+                cat_gate.observe(False)
+                with state.lock:
+                    state.serial_info = cat_gate.snapshot()
+            next_due = time.monotonic() + max(0.2, args.motion_sample)
+            continue
 
         started_at = time.monotonic()
         begin = time.perf_counter()
@@ -331,6 +385,8 @@ def make_handler(state, cat_only):
                         "error": state.error,
                         "age_classifier_loaded": False,
                         "arduino_serial": dict(state.serial_info),
+                        "motion_gate": dict(state.motion_info),
+                        "motion_samples": state.motion_samples,
                         "physical_servo_motion_verified": False,
                     }
                 payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -418,6 +474,14 @@ def main():
                         help="Minimum detik antar perintah (normal 60, bench minimal 5)")
     parser.add_argument("--bench-test", action="store_true",
                         help="Wajib untuk cooldown <30 detik; uji servo tanpa hopper/makanan saja")
+    parser.add_argument("--motion-gate", action="store_true",
+                        help="Only run YOLO when the USB camera sees motion")
+    parser.add_argument("--motion-sample", type=float, default=0.5)
+    parser.add_argument("--motion-threshold", type=int, default=20)
+    parser.add_argument("--motion-fraction", type=float, default=0.025)
+    parser.add_argument("--motion-hold", type=float, default=15.0)
+    parser.add_argument("--motion-warmup", type=float, default=3.0)
+    parser.add_argument("--idle-stream-fps", type=float, default=1.0)
     parser.add_argument("--cat-only", action="store_true",
                         help="Only show COCO class 'cat' (15); default all 80 classes")
     args = parser.parse_args()
@@ -427,6 +491,12 @@ def main():
             and 1 <= args.stream_fps <= 60
             and 30 <= args.jpeg_quality <= 95
             and args.box_ttl >= 0.2
+            and args.motion_sample >= 0.1
+            and 1 <= args.motion_threshold <= 255
+            and 0 < args.motion_fraction <= 1
+            and args.motion_hold >= 1
+            and args.motion_warmup >= 0
+            and 0.1 <= args.idle_stream_fps <= args.stream_fps
             and args.stable_hits >= 2 and args.rearm_seconds >= 1
             and args.cooldown_seconds >= (5 if args.bench_test else 30)
             and (not args.bench_test or bool(args.arduino_port))):
@@ -455,6 +525,9 @@ def main():
         flush=True,
     )
     state = State()
+    if args.motion_gate:
+        state.motion_active = False
+        state.motion_info = {"enabled": True, "active": False}
     bridge = None
     gate = None
     if args.arduino_port:
@@ -478,12 +551,18 @@ def main():
     infer = threading.Thread(
         target=inference_worker, args=(state, model, args, gate), daemon=True
     )
+    motion = (
+        threading.Thread(target=motion_worker, args=(state, cv2, args), daemon=True)
+        if args.motion_gate else None
+    )
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(state, args.cat_only)
     )
     server.daemon_threads = True
     capture.start()
     encoder.start()
+    if motion is not None:
+        motion.start()
     infer.start()
     print("[LIVE] http://127.0.0.1:%d/" % args.port, flush=True)
     print(
@@ -506,6 +585,8 @@ def main():
         capture.join(timeout=2)
         encoder.join(timeout=2)
         infer.join(timeout=2)
+        if motion is not None:
+            motion.join(timeout=2)
         if bridge is not None:
             bridge.close()
 
