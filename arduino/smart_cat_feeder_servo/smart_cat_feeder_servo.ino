@@ -17,7 +17,6 @@ const uint16_t HOPPER_EMPTY_CM = 25;
 const uint8_t HOPPER_MIN_PERCENT = 10;
 const unsigned long HOPPER_SAMPLE_MS = 500UL;
 const unsigned long HOPPER_ECHO_TIMEOUT_US = 12000UL;
-const unsigned long LCD_PAGE_MS = 2500UL;
 const uint8_t LED_RED_PIN = 7;
 const uint8_t IR_FOOD_PRESENT_LEVEL = LOW;
 const unsigned long FOOD_EMPTY_CONFIRM_MS = 3000UL;
@@ -69,28 +68,17 @@ uint8_t hopperPercent = 0;
 uint16_t hopperDistanceCm = 0;
 uint8_t hopperMisses = 0;
 unsigned long lastHopperSampleAt = 0;
-unsigned long lastLcdPageAt = 0;
-bool showBowlPage = false;
 
 
 void showScreen(ScreenState next) {
   const bool changed = screenState != next;
   screenState = next;
   if (lcd == nullptr || (lcdReady && !changed)) return;
+
   lcd->setCursor(0, 0);
-  lcd->print(F("SMART CAT FEEDER"));
-  lcd->setCursor(0, 1);
   lcd->print(F("                "));
-  lcd->setCursor(0, 1);
-  if (next == SCREEN_EMERGENCY) {
-    lcd->print(F("Emergency"));
-  } else if (next == SCREEN_FEEDING) {
-    lcd->print(F("Feeding"));
-  } else if (showBowlPage) {
-    if (!foodLevelKnown) lcd->print(F("Mangkuk: Cek"));
-    else if (foodPresent) lcd->print(F("Mangkuk: Ada"));
-    else lcd->print(F("Mangkuk: Kosong"));
-  } else if (!hopperKnown) {
+  lcd->setCursor(0, 0);
+  if (!hopperKnown) {
     lcd->print(F("Stok: Cek Sensor"));
   } else {
     lcd->print(F("Stok: "));
@@ -98,16 +86,22 @@ void showScreen(ScreenState next) {
     lcd->print('%');
     if (hopperPercent <= HOPPER_MIN_PERCENT) lcd->print(F(" LOW"));
   }
-  lcdReady = true;
-}
 
-void updateLcdPage() {
-  const unsigned long now = millis();
-  if ((unsigned long)(now - lastLcdPageAt) < LCD_PAGE_MS) return;
-  lastLcdPageAt = now;
-  showBowlPage = !showBowlPage;
-  lcdReady = false;
-  showScreen(screenState);
+  lcd->setCursor(0, 1);
+  lcd->print(F("                "));
+  lcd->setCursor(0, 1);
+  if (next == SCREEN_EMERGENCY) {
+    lcd->print(F("Emergency"));
+  } else if (next == SCREEN_FEEDING) {
+    lcd->print(F("Feeding"));
+  } else if (!foodLevelKnown) {
+    lcd->print(F("Mangkuk: Cek"));
+  } else if (foodPresent) {
+    lcd->print(F("Mangkuk: Ada"));
+  } else {
+    lcd->print(F("Mangkuk: Kosong"));
+  }
+  lcdReady = true;
 }
 
 bool i2cPresent(uint8_t address) {
@@ -528,5 +522,4 @@ void loop() {
   readSerialCommands();
   updateServo();
   updateCooldownDisplay();
-  updateLcdPage();
 }
