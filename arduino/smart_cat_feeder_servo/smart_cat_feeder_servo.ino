@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <TM1637Display.h>
+#include <EEPROM.h>
 
 
 const uint8_t SERVO_PIN = 9;
@@ -37,7 +38,7 @@ const unsigned long CLOSE_SETTLE_MS = 750UL;
 const unsigned long COOLDOWN_MS = 60000UL;
 
 Servo feederServo;
-TM1637Display cooldownDisplay(TM1637_CLK_PIN, TM1637_DIO_PIN);
+TM1637Display feedCountDisplay(TM1637_CLK_PIN, TM1637_DIO_PIN);
 
 
 LiquidCrystal_I2C lcd27(0x27, 16, 2);
@@ -139,7 +140,15 @@ ServoState servoState = IDLE;
 unsigned long stageStartedAt = 0;
 unsigned long lastFeedAt = 0;
 bool hasFed = false;
-unsigned long lastShownCooldownSeconds = 0xFFFFFFFFUL;
+const uint32_t FEED_COUNT_MAGIC = 0x43465431UL;
+
+struct StoredFeedCount {
+  uint32_t magic;
+  uint32_t count;
+  uint32_t invertedCount;
+};
+
+uint32_t feedCount = 0;
 
 unsigned long remainingCooldownSeconds(unsigned long now) {
   if (!hasFed) return 0;
@@ -150,14 +159,33 @@ unsigned long remainingCooldownSeconds(unsigned long now) {
 }
 
 
-void updateCooldownDisplay() {
-  const unsigned long secondsLeft = remainingCooldownSeconds(millis());
-  if (secondsLeft == lastShownCooldownSeconds) return;
-  lastShownCooldownSeconds = secondsLeft;
-  const unsigned int minutes = secondsLeft / 60UL;
-  const unsigned int seconds = secondsLeft % 60UL;
-  const int mmss = (int)(minutes * 100U + seconds);
-  cooldownDisplay.showNumberDecEx(mmss, 0b01000000, true, 4, 0);
+void updateFeedCountDisplay() {
+  feedCountDisplay.showNumberDec(feedCount % 10000UL, false, 4, 0);
+}
+
+void loadFeedCount() {
+  StoredFeedCount stored;
+  EEPROM.get(0, stored);
+  if (stored.magic == FEED_COUNT_MAGIC && stored.invertedCount == ~stored.count) {
+    feedCount = stored.count;
+  } else {
+    feedCount = 0;
+  }
+  updateFeedCountDisplay();
+}
+
+void recordCompletedFeed() {
+  if (feedCount != 0xFFFFFFFFUL) feedCount++;
+  StoredFeedCount stored = {FEED_COUNT_MAGIC, feedCount, ~feedCount};
+  EEPROM.put(0, stored);
+  updateFeedCountDisplay();
+  Serial.print(F("FEED_COUNT "));
+  Serial.println(feedCount);
+}
+
+void printFeedCount() {
+  Serial.print(F("FEED_COUNT "));
+  Serial.println(feedCount);
 }
 
 void printCooldownStatus() {
@@ -287,7 +315,6 @@ void startServoCycle(bool manual) {
   feederServo.writeMicroseconds(SERVO_RUN_US);
   digitalWrite(LED_BUILTIN, HIGH);
   updateStatusLEDs();
-  updateCooldownDisplay();
 }
 
 void updateManualButton() {
@@ -350,6 +377,10 @@ void scanI2CBus() {
 }
 
 void handleCommand(const char *command) {
+  if (strcmp(command, "FEED_COUNT") == 0) {
+    printFeedCount();
+    return;
+  }
   if (strcmp(command, "COOLDOWN_STATUS") == 0) {
     printCooldownStatus();
     return;
@@ -481,6 +512,7 @@ void updateServo() {
     manualCycle = false;
     showScreen(emergencyActive ? SCREEN_EMERGENCY : SCREEN_IDLE);
     updateStatusLEDs();
+    recordCompletedFeed();
     Serial.println(F("DONE"));
   }
 }
@@ -491,8 +523,8 @@ void setup() {
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_YELLOW_PIN, OUTPUT);
   pinMode(LED_RED_PIN, OUTPUT);
-  cooldownDisplay.setBrightness(4, true);
-  updateCooldownDisplay();
+  feedCountDisplay.setBrightness(4, true);
+  loadFeedCount();
   pinMode(HOPPER_TRIG_PIN, OUTPUT);
   digitalWrite(HOPPER_TRIG_PIN, LOW);
   pinMode(HOPPER_ECHO_PIN, INPUT);
@@ -521,5 +553,4 @@ void loop() {
   updateManualButton();
   readSerialCommands();
   updateServo();
-  updateCooldownDisplay();
 }
