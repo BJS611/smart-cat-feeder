@@ -192,7 +192,7 @@ def motion_worker(state, cv2, args):
                 state.motion_active = active
                 state.motion_info = gate.snapshot()
                 state.motion_samples += 1
-                if not active:
+                if not active and not state.cat_activity.get("cat_recent", False):
                     state.boxes = []
                     state.boxes_time = None
                 state.lock.notify_all()
