@@ -96,7 +96,8 @@ class ArduinoBridge:
         """
         self._write("FEED\n")
         reply = self._wait_for(
-            ("ACK FEED", "ERR BUSY", "ERR COOLDOWN", "ERR EMERGENCY", "ERR UNKNOWN_COMMAND"),
+            ("ACK FEED", "ERR BUSY", "ERR COOLDOWN", "ERR EMERGENCY",
+             "ERR HOPPER_LOW", "ERR BOWL_FULL", "ERR BOWL_UNKNOWN", "ERR UNKNOWN_COMMAND"),
             timeout=2.0,
         )
         return reply == "ACK FEED", reply
@@ -137,6 +138,17 @@ class ArduinoBridge:
                     "Firmware Arduino lama belum mendukung FOOD_STATUS. Upload sketch terbaru."
                 )
         raise RuntimeError("Arduino tidak membalas FOOD_STATUS; cek firmware/port.")
+
+    def hopper_status(self, timeout=2.0):
+        self._write("HOPPER_STATUS\n")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.serial.readline().decode("ascii", errors="replace").strip()
+            if line.startswith("HOPPER_STATUS "):
+                return line
+            if line:
+                print("[ARDUINO]", line, flush=True)
+        raise RuntimeError("Arduino tidak membalas HOPPER_STATUS.")
 
     def scan_i2c(self, timeout=8.0):
         """Scan Arduino Uno I2C bus (A4/A5). Does not actuate the servo."""

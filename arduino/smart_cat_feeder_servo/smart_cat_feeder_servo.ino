@@ -10,6 +10,14 @@ const uint8_t TM1637_DIO_PIN = 11;
 const uint8_t LED_GREEN_PIN = 4;
 const uint8_t LED_YELLOW_PIN = 5;
 const uint8_t IR_SENSOR_PIN = 6;
+const uint8_t HOPPER_TRIG_PIN = 3;
+const uint8_t HOPPER_ECHO_PIN = 8;
+const uint16_t HOPPER_FULL_CM = 5;
+const uint16_t HOPPER_EMPTY_CM = 25;
+const uint8_t HOPPER_MIN_PERCENT = 10;
+const unsigned long HOPPER_SAMPLE_MS = 500UL;
+const unsigned long HOPPER_ECHO_TIMEOUT_US = 12000UL;
+const unsigned long LCD_PAGE_MS = 2500UL;
 const uint8_t LED_RED_PIN = 7;
 const uint8_t IR_FOOD_PRESENT_LEVEL = LOW;
 const unsigned long FOOD_EMPTY_CONFIRM_MS = 3000UL;
@@ -56,14 +64,19 @@ bool foodLevelKnown = false;
 bool foodPresent = false;
 bool foodRawPresent = false;
 unsigned long foodRawChangedAt = 0;
+bool hopperKnown = false;
+uint8_t hopperPercent = 0;
+uint16_t hopperDistanceCm = 0;
+uint8_t hopperMisses = 0;
+unsigned long lastHopperSampleAt = 0;
+unsigned long lastLcdPageAt = 0;
+bool showBowlPage = false;
 
 
 void showScreen(ScreenState next) {
-  const bool changed = (screenState != next);
+  const bool changed = screenState != next;
   screenState = next;
-  if (lcd == nullptr) return;
-  if (lcdReady && !changed) return;
-
+  if (lcd == nullptr || (lcdReady && !changed)) return;
   lcd->setCursor(0, 0);
   lcd->print(F("SMART CAT FEEDER"));
   lcd->setCursor(0, 1);
@@ -73,14 +86,28 @@ void showScreen(ScreenState next) {
     lcd->print(F("Emergency"));
   } else if (next == SCREEN_FEEDING) {
     lcd->print(F("Feeding"));
-  } else if (!foodLevelKnown) {
-    lcd->print(F("Cek Makanan"));
-  } else if (!foodPresent) {
-    lcd->print(F("Makanan Habis"));
+  } else if (showBowlPage) {
+    if (!foodLevelKnown) lcd->print(F("Mangkuk: Cek"));
+    else if (foodPresent) lcd->print(F("Mangkuk: Ada"));
+    else lcd->print(F("Mangkuk: Kosong"));
+  } else if (!hopperKnown) {
+    lcd->print(F("Stok: Cek Sensor"));
   } else {
-    lcd->print(F("Idle"));
+    lcd->print(F("Stok: "));
+    lcd->print(hopperPercent);
+    lcd->print('%');
+    if (hopperPercent <= HOPPER_MIN_PERCENT) lcd->print(F(" LOW"));
   }
   lcdReady = true;
+}
+
+void updateLcdPage() {
+  const unsigned long now = millis();
+  if ((unsigned long)(now - lastLcdPageAt) < LCD_PAGE_MS) return;
+  lastLcdPageAt = now;
+  showBowlPage = !showBowlPage;
+  lcdReady = false;
+  showScreen(screenState);
 }
 
 bool i2cPresent(uint8_t address) {
@@ -150,12 +177,61 @@ uint8_t lineLength = 0;
 
 void updateStatusLEDs() {
   const bool active = (servoState != IDLE) || emergencyActive;
-  const bool lowOrUnknown = !foodLevelKnown || !foodPresent;
+  const bool lowOrUnknown = !hopperKnown || hopperPercent <= HOPPER_MIN_PERCENT;
   digitalWrite(LED_GREEN_PIN, (!active && !lowOrUnknown) ? HIGH : LOW);
   digitalWrite(LED_YELLOW_PIN, active ? HIGH : LOW);
   digitalWrite(LED_RED_PIN, lowOrUnknown ? HIGH : LOW);
 }
 
+
+void updateHopperSensor() {
+  const unsigned long now = millis();
+  if ((unsigned long)(now - lastHopperSampleAt) < HOPPER_SAMPLE_MS) return;
+  lastHopperSampleAt = now;
+  digitalWrite(HOPPER_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(HOPPER_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(HOPPER_TRIG_PIN, LOW);
+  const unsigned long echoUs = pulseIn(HOPPER_ECHO_PIN, HIGH, HOPPER_ECHO_TIMEOUT_US);
+  const unsigned long distanceCm = echoUs * 343UL / 20000UL;
+  if (echoUs == 0 || distanceCm < 2 || distanceCm > 200) {
+    if (hopperMisses < 3) hopperMisses++;
+    if (hopperMisses >= 3 && hopperKnown) {
+      hopperKnown = false;
+      updateStatusLEDs();
+      lcdReady = false;
+      showScreen(screenState);
+      Serial.println(F("HOPPER SENSOR_ERROR"));
+    }
+    return;
+  }
+  hopperMisses = 0;
+  long percent = ((long)HOPPER_EMPTY_CM - (long)distanceCm) * 100L /
+                 ((long)HOPPER_EMPTY_CM - (long)HOPPER_FULL_CM);
+  percent = constrain(percent, 0L, 100L);
+  const uint8_t measured = (uint8_t)percent;
+  const bool changed = !hopperKnown || measured != hopperPercent;
+  hopperKnown = true;
+  hopperPercent = measured;
+  hopperDistanceCm = (uint16_t)distanceCm;
+  if (changed) {
+    updateStatusLEDs();
+    lcdReady = false;
+    showScreen(screenState);
+  }
+}
+
+void printHopperStatus() {
+  Serial.print(F("HOPPER_STATUS STATE="));
+  Serial.print(hopperKnown ? F("OK") : F("UNKNOWN"));
+  Serial.print(F(" PERCENT="));
+  if (hopperKnown) Serial.print(hopperPercent);
+  else Serial.print(F("NA"));
+  Serial.print(F(" DIST_CM="));
+  if (hopperKnown) Serial.println(hopperDistanceCm);
+  else Serial.println(F("NA"));
+}
 
 void updateFoodSensor() {
   const unsigned long now = millis();
@@ -284,8 +360,12 @@ void handleCommand(const char *command) {
     printCooldownStatus();
     return;
   }
-  if (strcmp(command, "FOOD_STATUS") == 0) {
+  if (strcmp(command, "FOOD_STATUS") == 0 || strcmp(command, "BOWL_STATUS") == 0) {
     printFoodStatus();
+    return;
+  }
+  if (strcmp(command, "HOPPER_STATUS") == 0) {
+    printHopperStatus();
     return;
   }
   if (strcmp(command, "I2C_SCAN") == 0) {
@@ -344,6 +424,18 @@ void handleCommand(const char *command) {
     }
 
 
+    if (!hopperKnown || hopperPercent <= HOPPER_MIN_PERCENT) {
+      Serial.println(F("ERR HOPPER_LOW"));
+      return;
+    }
+    if (!foodLevelKnown) {
+      Serial.println(F("ERR BOWL_UNKNOWN"));
+      return;
+    }
+    if (foodPresent) {
+      Serial.println(F("ERR BOWL_FULL"));
+      return;
+    }
     startServoCycle(false);
     Serial.println(F("ACK FEED"));
     return;
@@ -407,6 +499,9 @@ void setup() {
   pinMode(LED_RED_PIN, OUTPUT);
   cooldownDisplay.setBrightness(4, true);
   updateCooldownDisplay();
+  pinMode(HOPPER_TRIG_PIN, OUTPUT);
+  digitalWrite(HOPPER_TRIG_PIN, LOW);
+  pinMode(HOPPER_ECHO_PIN, INPUT);
   pinMode(IR_SENSOR_PIN, INPUT_PULLUP);
   foodRawPresent = digitalRead(IR_SENSOR_PIN) == IR_FOOD_PRESENT_LEVEL;
   foodRawChangedAt = millis();
@@ -427,9 +522,11 @@ void setup() {
 }
 
 void loop() {
+  updateHopperSensor();
   updateFoodSensor();
   updateManualButton();
   readSerialCommands();
   updateServo();
   updateCooldownDisplay();
+  updateLcdPage();
 }

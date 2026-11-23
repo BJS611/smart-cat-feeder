@@ -28,6 +28,10 @@ def main():
         help="Monitor Arduino serial events while pressing the physical D2 button"
     )
     actions.add_argument(
+        "--hopper-monitor", action="store_true",
+        help="Monitor HC-SR04 percentage without actuating the servo"
+    )
+    actions.add_argument(
         "--food-monitor", action="store_true",
         help="Monitor raw infrared sensor and confirmed food state (no servo movement)"
     )
@@ -55,6 +59,13 @@ def main():
                     time.sleep(0.2)
             except KeyboardInterrupt:
                 print("\n[TM1637] Monitor selesai.", flush=True)
+        elif args.hopper_monitor:
+            try:
+                while True:
+                    print("[HOPPER]", bridge.hopper_status(), flush=True)
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n[HOPPER] Monitor selesai.", flush=True)
         elif args.food_monitor:
             print("[IR] Pantau sensor D6. Tutupi/hilangkan pakan di depan sensor.", flush=True)
             print("[IR] Ctrl+C untuk berhenti. Tidak ada perintah FEED.", flush=True)
