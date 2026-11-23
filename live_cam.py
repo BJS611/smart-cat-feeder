@@ -165,7 +165,11 @@ def motion_worker(state, cv2, args):
         warmup_seconds=args.motion_warmup,
     )
     last_seq = 0
+    next_sample = 0.0
     while not state.stop.is_set():
+        wait_seconds = next_sample - time.monotonic()
+        if wait_seconds > 0 and state.stop.wait(wait_seconds):
+            break
         with state.lock:
             state.lock.wait_for(
                 lambda: state.raw_seq != last_seq or state.stop.is_set(),
@@ -177,6 +181,7 @@ def motion_worker(state, cv2, args):
                 continue
             frame = state.raw.copy()
             last_seq = state.raw_seq
+        next_sample = time.monotonic() + args.motion_sample
         try:
             active = gate.observe(frame, cv2)
             with state.lock:
