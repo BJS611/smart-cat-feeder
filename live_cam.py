@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from yolo11_runtime import draw_boxes, load_detector, open_camera, predict_boxes
 from cat_servo_bridge import ArduinoBridge, CatGate
 from motion_gate import MotionGate
+from cat_activity import CatActivity
 
 
 class State:
@@ -45,6 +46,7 @@ class State:
         self.motion_active = True
         self.motion_info = {"enabled": False, "active": True}
         self.motion_samples = 0
+        self.cat_activity = {"enabled": False, "mode": "continuous"}
 
 
 def configure_camera_exposure(source, allow_dynamic_fps=False, verify=False):
@@ -261,9 +263,12 @@ def encoder_worker(state, cv2, args):
 
 
 def inference_worker(state, model, args, cat_gate=None):
-    """YOLO processes distinct, newest frames; never queues historical frames."""
     last_seq = 0
     next_due = 0.0
+    activity = (
+        CatActivity(args.cat_probe_seconds, args.cat_active_hold)
+        if args.cat_activated_yolo else None
+    )
     while not state.stop.is_set():
         delay = next_due - time.monotonic()
         if delay > 0 and state.stop.wait(delay):
@@ -278,15 +283,23 @@ def inference_worker(state, model, args, cat_gate=None):
                 break
             if state.raw is None or state.raw_seq == last_seq:
                 continue
-            frame = state.raw.copy()
-            last_seq = state.raw_seq
             motion_active = state.motion_active
+            last_seq = state.raw_seq
+            can_infer = (
+                activity.should_infer(motion_active)
+                if activity is not None
+                else not args.motion_gate or motion_active
+            )
+            frame = state.raw.copy() if can_infer else None
 
-        if args.motion_gate and not motion_active:
+        if not can_infer:
             if cat_gate is not None:
                 cat_gate.observe(False)
                 with state.lock:
                     state.serial_info = cat_gate.snapshot()
+            if activity is not None:
+                with state.lock:
+                    state.cat_activity = activity.snapshot()
             next_due = time.monotonic() + max(0.2, args.motion_sample)
             continue
 
@@ -299,15 +312,19 @@ def inference_worker(state, model, args, cat_gate=None):
             )
             dt_ms = (time.perf_counter() - begin) * 1000.0
             now = time.monotonic()
-
+            cat_detected = any(b[4] == 15 for b in boxes)
+            if activity is not None:
+                activity.observe(cat_detected, now)
             with state.lock:
                 state.boxes = boxes
                 state.boxes_time = now
                 state.inferences += 1
                 state.infer_times.append(now)
                 state.det_ms = round(dt_ms, 1)
+                if activity is not None:
+                    state.cat_activity = activity.snapshot(now)
             if cat_gate is not None:
-                cat_gate.observe(any(b[4] == 15 for b in boxes))
+                cat_gate.observe(cat_detected)
                 with state.lock:
                     state.serial_info = cat_gate.snapshot()
         except Exception as exc:
@@ -317,7 +334,8 @@ def inference_worker(state, model, args, cat_gate=None):
             with state.lock:
                 state.lock.notify_all()
             return
-        next_due = max(started_at + args.interval, time.monotonic())
+        period = activity.interval(args.interval, now) if activity is not None else args.interval
+        next_due = max(started_at + period, time.monotonic())
 
 
 PAGE = """<!doctype html><html lang="id"><head>
@@ -392,6 +410,7 @@ def make_handler(state, cat_only):
                         "arduino_serial": dict(state.serial_info),
                         "motion_gate": dict(state.motion_info),
                         "motion_samples": state.motion_samples,
+                        "cat_activity": dict(state.cat_activity),
                         "physical_servo_motion_verified": False,
                     }
                 payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -487,6 +506,10 @@ def main():
     parser.add_argument("--motion-hold", type=float, default=15.0)
     parser.add_argument("--motion-warmup", type=float, default=3.0)
     parser.add_argument("--idle-stream-fps", type=float, default=1.0)
+    parser.add_argument("--cat-activated-yolo", action="store_true",
+                        help="Probe for cat at low rate after motion; run YOLO quickly only when cat is confirmed")
+    parser.add_argument("--cat-probe-seconds", type=float, default=2.0)
+    parser.add_argument("--cat-active-hold", type=float, default=10.0)
     parser.add_argument("--cat-only", action="store_true",
                         help="Only show COCO class 'cat' (15); default all 80 classes")
     args = parser.parse_args()
@@ -497,6 +520,9 @@ def main():
             and 30 <= args.jpeg_quality <= 95
             and args.box_ttl >= 0.2
             and args.motion_sample >= 0.1
+            and args.cat_probe_seconds >= 0.2
+            and args.cat_active_hold >= 1
+            and (not args.cat_activated_yolo or args.motion_gate)
             and 1 <= args.motion_threshold <= 255
             and 0 < args.motion_fraction <= 1
             and args.motion_hold >= 1
@@ -530,6 +556,8 @@ def main():
         flush=True,
     )
     state = State()
+    if args.cat_activated_yolo:
+        state.cat_activity = {"enabled": True, "mode": "standby"}
     if args.motion_gate:
         state.motion_active = False
         state.motion_info = {"enabled": True, "active": False}
